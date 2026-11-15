@@ -3,12 +3,13 @@
 A small, friendly, ready-to-use agent for the **Zavia blog**
 ([zaviamagazine.dev](https://zaviamagazine.dev)).
 
-It does four useful jobs, and nothing else:
+It does five useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
 3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical
-4. **Web dashboard** — the same jobs in your browser
+4. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
+5. **Web dashboard** — the same jobs in your browser
 
 Built for Uzair (BCS student, Pakistan). Simple English, a little Roman
 Urdu where natural, and it never crashes on a bad input — it explains
@@ -53,6 +54,7 @@ python -m zavia_agent.cli
   4  Update an article (from a JSON file)
   5  SEO check (sitemap + one article)
   6  Show config / status
+  7  Find junk / test articles (to delete)
   0  Exit
 =============================================
 ```
@@ -62,6 +64,7 @@ python -m zavia_agent.cli
 ```bash
 python -m zavia_agent.cli --health
 python -m zavia_agent.cli --seo
+python -m zavia_agent.cli --junk
 python -m zavia_agent.cli --list
 python -m zavia_agent.cli --publish examples/sample-article.md
 python -m zavia_agent.cli --update update.json

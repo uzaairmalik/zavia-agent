@@ -126,6 +126,76 @@ def check_article(client, slug):
     }
 
 
+def find_junk_articles(client=None):
+    """Find test / junk articles that need deleting.
+
+    Two sources:
+    (a) Sitemap scan — a slug looks like junk when it contains one of these
+        markers: "please-ignore", "test-article", "lorem", "asdf", "xxx",
+        "delete-me". NOTE: a bare "test" or "draft" is deliberately NOT a
+        marker — it matches real content (cricket "Test" matches, sports
+        drafts, "latest", "contest"), so it would cry wolf.
+    (b) Known test slugs — the two test articles are live (HTTP 200) but no
+        longer in the sitemap, so a sitemap-only scan misses them. These are
+        checked directly by URL: 200 = still live, 404 = cleaned up.
+    Test articles hurt SEO (thin pages Google can index) and look
+    unprofessional, so this reports them for cleanup. Deleting is a manual
+    admin-panel step — this function only FINDS them, it never deletes anything.
+
+    Returns a dict:
+    {
+      "total_articles": int,
+      "junk": [{"slug": str, "url": str, "marker": str, "source": str}, ...],
+      "ok": bool,   # True when no junk found
+      "summary": str,
+    }
+    """
+    client = client or ZaviaClient()
+    urls = client.get_sitemap_urls()
+    article_urls = [u for u in urls if "/article/" in urlparse(u).path]
+    markers = ("please-ignore", "test-article", "lorem", "asdf", "xxx", "delete-me")
+    junk = []
+    seen = set()
+    for url in article_urls:
+        slug = _slug_of(url)
+        lowered = slug.lower()
+        for marker in markers:
+            if marker in lowered:
+                junk.append({"slug": slug, "url": url, "marker": marker, "source": "sitemap"})
+                seen.add(slug)
+                break
+    # (b) Known test slugs, checked live (they are not in the sitemap any more).
+    for slug in KNOWN_JUNK_SLUGS:
+        if slug in seen:
+            continue
+        info = client.get_article(slug)
+        if info["status"] == 200:
+            junk.append({"slug": slug, "url": info["url"], "marker": "known test article", "source": "live check"})
+            seen.add(slug)
+    if junk:
+        summary = (
+            f"Found {len(junk)} junk/test article(s) still live — "
+            "delete them in the admin panel (zaviamagazine.dev/admin → Articles tab)."
+        )
+    else:
+        summary = "No junk/test articles found. Clean!"
+    return {
+        "total_articles": len(article_urls),
+        "junk": junk,
+        "ok": not junk,
+        "summary": summary,
+    }
+
+
+# Test articles that are live but no longer appear in the sitemap, so the
+# sitemap scan alone would miss them. Remove a slug here once it is deleted
+# (it will then 404 and the live check will stop reporting it).
+KNOWN_JUNK_SLUGS = (
+    "test-article-please-ignore-two",
+    "test-article-please-ignore-three",
+)
+
+
 def check_article_by_slug(slug, client=None):
     """Convenience wrapper that builds a client when none is given."""
     return check_article(client or ZaviaClient(), slug)

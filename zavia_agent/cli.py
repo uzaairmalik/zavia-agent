@@ -22,7 +22,7 @@ import sys
 
 from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
-from .seo import check_article, check_sitemap
+from .seo import check_article, check_sitemap, find_junk_articles
 
 
 # ---------------------------------------------------------------- front-matter
@@ -155,6 +155,18 @@ def do_config(client):
     print("  Note: Vercel deploys take ~30 min, so a new article may not show up instantly. Sabar karo, aa jayega.")
 
 
+def do_junk(client):
+    print("\nChecking for test / junk articles (sitemap scan + live check of known test slugs)...")
+    report = find_junk_articles(client)
+    print("\n" + report["summary"])
+    if report["junk"]:
+        for item in report["junk"]:
+            print(f"  - {item['slug']}  ({item['marker']}, via {item['source']})")
+            print(f"    {item['url']}")
+        print("\nDelete these in the admin panel: zaviamagazine.dev/admin → Articles tab.")
+        print("After deleting, they 404 and drop out — that is expected, not a problem.")
+
+
 # ---------------------------------------------------------------- menu
 MENU = """
 ================ ZAVIA AGENT ================
@@ -164,6 +176,7 @@ MENU = """
   4  Update an article (from a JSON file)
   5  SEO check (sitemap + one article)
   6  Show config / status
+  7  Find junk / test articles (to delete)
   0  Exit
 =============================================
 """
@@ -201,8 +214,10 @@ def interactive(client):
                 do_seo(client)
             elif choice == "6":
                 do_config(client)
+            elif choice == "7":
+                do_junk(client)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-6.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-7.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -219,6 +234,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="zavia-agent", description="Interactive agent for the Zavia blog.")
     parser.add_argument("--health", action="store_true", help="Run the health check and exit.")
     parser.add_argument("--seo", action="store_true", help="Run the SEO check and exit.")
+    parser.add_argument("--junk", action="store_true", help="Find test/junk articles in the sitemap and exit.")
     parser.add_argument("--list", action="store_true", help="List recent articles and exit.")
     parser.add_argument("--publish", metavar="FILE", help="Publish an article from a Markdown file and exit.")
     parser.add_argument("--update", metavar="FILE", help="Update an article from a JSON file and exit.")
@@ -230,6 +246,9 @@ def main(argv=None):
     try:
         if args.health:
             do_health(client)
+            return 0
+        if args.junk:
+            do_junk(client)
             return 0
         if args.seo:
             report = check_sitemap(client)
