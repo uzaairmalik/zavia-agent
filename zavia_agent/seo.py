@@ -3,7 +3,9 @@
 - check_sitemap(): fetch /sitemap.xml, count URLs, find duplicate slugs,
   and fetch a small sample of URLs to catch 404s.
 - check_article(slug): fetch one article page, confirm it loads, that a
-  <title> is present, and that a canonical link is present.
+  <title> is present, that a canonical link is present, and that it has
+  a meta description + Open Graph tags (warnings, not failures).
+- check_articles(slugs): same checks for several slugs at once.
 
 Nothing here needs a token — these are plain public-page checks.
 """
@@ -15,6 +17,11 @@ from .client import ZaviaClient, ZaviaError
 
 CANONICAL_RE = re.compile(r'<link[^>]+rel=["\']canonical["\'][^>]*>', re.IGNORECASE)
 HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+# Meta description + Open Graph tags (Google + social previews use these).
+DESCRIPTION_RE = re.compile(r'<meta[^>]+name=["\']description["\'][^>]*>', re.IGNORECASE)
+OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]*>', re.IGNORECASE)
+OG_DESC_RE = re.compile(r'<meta[^>]+property=["\']og:description["\'][^>]*>', re.IGNORECASE)
+CONTENT_RE = re.compile(r'content=["\']([^"\']*)["\']', re.IGNORECASE)
 
 
 def _slug_of(url):
@@ -87,11 +94,19 @@ def check_sitemap(client=None, sample=10, timeout=15):
 def check_article(client, slug):
     """Check one article page.
 
+    Besides title + canonical, this also checks the meta description
+    (Google shows it in search results — a missing one means Google
+    writes its own snippet) and the Open Graph title/description
+    (used for Facebook/WhatsApp link previews).
+
     Returns a dict:
     {
       "slug": str, "url": str, "status": int|None,
       "title": str, "title_found": bool,
       "canonical": str|None, "canonical_found": bool,
+      "description": str, "description_found": bool,
+      "og_title_found": bool, "og_description_found": bool,
+      "warnings": [str, ...],   # missing description / OG tags (not fatal)
       "ok": bool, "summary": str,
     }
     """
@@ -104,6 +119,22 @@ def check_article(client, slug):
         href = HREF_RE.search(match.group(0))
         if href:
             canonical = href.group(1)
+    description = ""
+    description_found = False
+    match = DESCRIPTION_RE.search(html)
+    if match:
+        content = CONTENT_RE.search(match.group(0))
+        if content:
+            description = content.group(1).strip()
+            description_found = bool(description)
+    og_title_found = bool(OG_TITLE_RE.search(html))
+    og_description_found = bool(OG_DESC_RE.search(html))
+    warnings = []
+    if info["status"] == 200:
+        if not description_found:
+            warnings.append("no meta description (Google will write its own snippet)")
+        if not og_title_found or not og_description_found:
+            warnings.append("missing Open Graph tags (link previews on Facebook/WhatsApp will look plain)")
     ok = info["status"] == 200 and title_found and canonical is not None
     if info["status"] == 404:
         summary = f"Article '{slug}' is a 404 (not found)."
@@ -113,6 +144,8 @@ def check_article(client, slug):
         summary = f"Article '{slug}' loaded but has no canonical link."
     else:
         summary = f"Article '{slug}' OK — title present, canonical: {canonical}."
+    if warnings:
+        summary += " Warning: " + "; ".join(warnings) + "."
     return {
         "slug": slug,
         "url": info["url"],
@@ -121,8 +154,65 @@ def check_article(client, slug):
         "title_found": title_found,
         "canonical": canonical,
         "canonical_found": canonical is not None,
+        "description": description[:160],
+        "description_found": description_found,
+        "og_title_found": og_title_found,
+        "og_description_found": og_description_found,
+        "warnings": warnings,
         "ok": ok,
         "summary": summary,
+    }
+
+
+def check_articles(client, slugs):
+    """Check several article slugs at once (bulk SEO check).
+
+    slugs: list of slug strings (empty entries ignored).
+    Returns a dict:
+    {
+      "results": [check_article(...) dict, ...],
+      "checked": int, "failed": int, "warned": int,
+      "ok": bool,   # True only when every article passed title+canonical
+      "summary": str,
+    }
+    A missing meta description or OG tag is a warning, not a failure —
+    the article still loads and ranks, it just looks worse in search
+    results and link previews.
+    """
+    results = []
+    for slug in slugs:
+        slug = (slug or "").strip().strip("/")
+        if not slug:
+            continue
+        try:
+            results.append(check_article(client, slug))
+        except ZaviaError as exc:
+            results.append({
+                "slug": slug, "url": "", "status": None, "title": "",
+                "title_found": False, "canonical": None,
+                "canonical_found": False, "description": "",
+                "description_found": False, "og_title_found": False,
+                "og_description_found": False,
+                "warnings": [], "ok": False,
+                "summary": f"Article '{slug}' could not be checked: {exc}",
+            })
+    failed = [r for r in results if not r["ok"]]
+    warned = [r for r in results if r["ok"] and r["warnings"]]
+    ok = not failed
+    parts = [f"Checked {len(results)} article(s)"]
+    if failed:
+        parts.append(f"{len(failed)} failed: " + ", ".join(r["slug"] for r in failed))
+    if warned:
+        parts.append(f"{len(warned)} with warnings: " + ", ".join(r["slug"] for r in warned))
+    if not failed and not warned:
+        parts.append("all OK — titles, canonicals, meta descriptions and OG tags present")
+    return {
+        "results": results,
+        "checked": len(results),
+        "failed": len(failed),
+        "warned": len(warned),
+        "ok": ok,
+        "summary": "; ".join(parts) + ".",
     }
 
 

@@ -7,7 +7,7 @@ It does five useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
-3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical
+3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once
 4. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
 5. **Web dashboard** — the same jobs in your browser
 
@@ -55,6 +55,7 @@ python -m zavia_agent.cli
   5  SEO check (sitemap + one article)
   6  Show config / status
   7  Find junk / test articles (to delete)
+  8  Bulk SEO check (several article slugs at once)
   0  Exit
 =============================================
 ```
@@ -64,12 +65,30 @@ python -m zavia_agent.cli
 ```bash
 python -m zavia_agent.cli --health
 python -m zavia_agent.cli --seo
+python -m zavia_agent.cli --seo --article my-article-slug
+python -m zavia_agent.cli --seo --articles slug-one,slug-two,slug-three
 python -m zavia_agent.cli --junk
 python -m zavia_agent.cli --list
 python -m zavia_agent.cli --publish examples/sample-article.md
 python -m zavia_agent.cli --update update.json
 python -m zavia_agent.cli --config
 ```
+
+### Bulk SEO check (several articles at once)
+
+```bash
+python -m zavia_agent.cli --seo --articles slug-one,slug-two,slug-three
+# [OK  ] slug-one
+# [WARN] slug-two — no meta description (Google will write its own snippet)
+# [FAIL] slug-three — Article 'slug-three' is a 404 (not found).
+```
+
+Each article is checked for: a `<title>`, a canonical link, a meta
+description, and Open Graph title/description (for Facebook/WhatsApp
+link previews). A missing description or OG tag is a **warning**, not a
+failure — the article still loads, it just looks worse in search
+results and link previews. A missing title, canonical, or a 404 is a
+failure (exit code 1).
 
 ### Web dashboard
 
@@ -192,6 +211,7 @@ zavia-agent/
 ├── examples/
 │   └── sample-article.md
 ├── test_smoke.py       # dry-run health check, no token needed
+├── IMPROVEMENTS.md     # one line per daily improvement (date + commit)
 ├── requirements.txt    # requests + flask only
 ├── .env.example        # copy to .env, add your token
 ├── .gitignore          # keeps .env out of git

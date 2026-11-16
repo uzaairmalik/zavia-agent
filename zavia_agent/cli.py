@@ -6,6 +6,7 @@ Run it and pick a number:
 Or run one job directly (no menu):
     python -m zavia_agent.cli --health
     python -m zavia_agent.cli --seo
+    python -m zavia_agent.cli --seo --articles slug-one,slug-two
     python -m zavia_agent.cli --list
     python -m zavia_agent.cli --publish examples/sample-article.md
     python -m zavia_agent.cli --update update.json
@@ -22,7 +23,7 @@ import sys
 
 from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
-from .seo import check_article, check_sitemap, find_junk_articles
+from .seo import check_article, check_articles, check_sitemap, find_junk_articles
 
 
 # ---------------------------------------------------------------- front-matter
@@ -147,6 +148,26 @@ def do_seo(client):
         print("\n" + info["summary"])
 
 
+def do_bulk_seo(client, slugs):
+    """Check several article slugs at once; print one line per article.
+
+    Returns the report dict (so --seo --articles can exit non-zero
+    when an article fails its title/canonical check).
+    """
+    print(f"\nChecking {len(slugs)} article(s) — title, canonical, meta description, OG tags...")
+    report = check_articles(client, slugs)
+    for result in report["results"]:
+        mark = "OK  " if result["ok"] and not result["warnings"] else ("WARN" if result["ok"] else "FAIL")
+        line = f"  [{mark}] {result['slug']}"
+        if result["warnings"]:
+            line += " — " + "; ".join(result["warnings"])
+        elif not result["ok"]:
+            line += " — " + result["summary"]
+        print(line)
+    print("\n" + report["summary"])
+    return report
+
+
 def do_config(client):
     print("\nConfig / status")
     print(f"  Site (base URL): {client.base_url}")
@@ -177,6 +198,7 @@ MENU = """
   5  SEO check (sitemap + one article)
   6  Show config / status
   7  Find junk / test articles (to delete)
+  8  Bulk SEO check (several article slugs at once)
   0  Exit
 =============================================
 """
@@ -216,8 +238,15 @@ def interactive(client):
                 do_config(client)
             elif choice == "7":
                 do_junk(client)
+            elif choice == "8":
+                raw = input("Article slugs, comma-separated (e.g. slug-one, slug-two): ").strip()
+                slugs = [s.strip() for s in raw.split(",") if s.strip()]
+                if not slugs:
+                    print("No slugs given — wapas menu par.")
+                else:
+                    do_bulk_seo(client, slugs)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-7.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-8.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -240,6 +269,7 @@ def main(argv=None):
     parser.add_argument("--update", metavar="FILE", help="Update an article from a JSON file and exit.")
     parser.add_argument("--config", action="store_true", help="Show config/status and exit.")
     parser.add_argument("--article", metavar="SLUG", help="With --seo: also check this one article slug in detail.")
+    parser.add_argument("--articles", metavar="SLUGS", help="With --seo: check several article slugs at once, comma-separated (title, canonical, meta description, OG tags).")
     args = parser.parse_args(argv)
 
     client = ZaviaClient()
@@ -251,6 +281,13 @@ def main(argv=None):
             do_junk(client)
             return 0
         if args.seo:
+            if args.articles:
+                slugs = [s.strip() for s in args.articles.split(",") if s.strip()]
+                if not slugs:
+                    print("Error: --articles needs at least one slug.", file=sys.stderr)
+                    return 1
+                report = do_bulk_seo(client, slugs)
+                return 0 if report["ok"] else 1
             report = check_sitemap(client)
             print(report["summary"])
             if report["duplicate_slugs"]:
