@@ -20,7 +20,7 @@ the problem in plain words and sends you back to the menu.
 ## Setup (one time, ~2 minutes)
 
 ```bash
-git clone <your-new-repo-url> zavia-agent
+git clone https://github.com/uzaairmalik/zavia-agent.git
 cd zavia-agent
 
 python -m venv .venv
