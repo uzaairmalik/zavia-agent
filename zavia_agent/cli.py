@@ -7,6 +7,7 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --health
     python -m zavia_agent.cli --seo
     python -m zavia_agent.cli --seo --articles slug-one,slug-two
+    python -m zavia_agent.cli --seo-report
     python -m zavia_agent.cli --list
     python -m zavia_agent.cli --publish examples/sample-article.md
     python -m zavia_agent.cli --update update.json
@@ -23,6 +24,7 @@ import sys
 
 from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
+from .report import compare_reports, load_previous_state, run_audit, write_report
 from .seo import check_article, check_articles, check_sitemap, find_junk_articles
 
 
@@ -188,6 +190,39 @@ def do_junk(client):
         print("After deleting, they 404 and drop out — that is expected, not a problem.")
 
 
+def do_seo_report(client):
+    """Full SEO audit + dated report (Lesson 14 pattern).
+
+    Runs the audit, compares with the previous run (if any), writes a
+    dated Markdown + HTML report under reports/, and saves the state
+    for the next comparison. Non-interactive — safe to run from cron.
+    Returns the audit dict.
+    """
+    print("\nRunning the full SEO audit (sitemap + every article + junk check)...")
+    print("This takes a minute or two — one request per article.")
+    previous = load_previous_state()
+    audit = run_audit(client)
+    comparison = compare_reports(previous, audit)
+    paths = write_report(audit, comparison)
+    counts = audit["counts"]
+    print("\n" + audit["checks"]["sitemap"])
+    print(audit["checks"]["articles"])
+    print(audit["checks"]["junk"])
+    print(f"\nIssues: {counts['total_issues']} total "
+          f"({counts['fail_issues']} FAIL, {counts['warn_issues']} warnings).")
+    if comparison["first_run"]:
+        print("First audit run — no previous report to compare with yet.")
+    else:
+        print(f"Since the last report ({comparison['previous_date']}): "
+              f"{len(comparison['improved'])} fixed, "
+              f"{len(comparison['worse'])} new failures, "
+              f"{len(comparison['new'])} new issues.")
+    print("\nReport written:")
+    print("  " + paths["md"])
+    print("  " + paths["html"])
+    return audit
+
+
 # ---------------------------------------------------------------- menu
 MENU = """
 ================ ZAVIA AGENT ================
@@ -199,6 +234,7 @@ MENU = """
   6  Show config / status
   7  Find junk / test articles (to delete)
   8  Bulk SEO check (several article slugs at once)
+  9  SEO audit report (full audit + dated report file)
   0  Exit
 =============================================
 """
@@ -245,8 +281,10 @@ def interactive(client):
                     print("No slugs given — wapas menu par.")
                 else:
                     do_bulk_seo(client, slugs)
+            elif choice == "9":
+                do_seo_report(client)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-8.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-9.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -263,6 +301,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="zavia-agent", description="Interactive agent for the Zavia blog.")
     parser.add_argument("--health", action="store_true", help="Run the health check and exit.")
     parser.add_argument("--seo", action="store_true", help="Run the SEO check and exit.")
+    parser.add_argument("--seo-report", action="store_true",
+                        help="Run the full SEO audit and write a dated report under reports/ (Lesson 14 pattern; safe for cron).")
     parser.add_argument("--junk", action="store_true", help="Find test/junk articles in the sitemap and exit.")
     parser.add_argument("--list", action="store_true", help="List recent articles and exit.")
     parser.add_argument("--publish", metavar="FILE", help="Publish an article from a Markdown file and exit.")
@@ -277,6 +317,9 @@ def main(argv=None):
         if args.health:
             do_health(client)
             return 0
+        if args.seo_report:
+            audit = do_seo_report(client)
+            return 0 if audit["ok"] else 1
         if args.junk:
             do_junk(client)
             return 0

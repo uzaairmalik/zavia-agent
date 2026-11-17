@@ -5,7 +5,8 @@ Run it:
 Then open http://127.0.0.1:5000 in your browser.
 
 Home page shows: site health, article count, a form to publish an
-article, and a button to run the SEO check. Results appear on the page.
+article, a button to run the SEO check, and the latest SEO audit
+report (see report.py). Results appear on the page.
 
 No build step, no template files — the HTML lives in this one file.
 Publishing needs ZAVIA_PUBLISH_TOKEN in your .env file.
@@ -13,10 +14,11 @@ Publishing needs ZAVIA_PUBLISH_TOKEN in your .env file.
 
 import os
 
-from flask import Flask, render_template_string, request
+from flask import Flask, abort, render_template_string, request, send_from_directory
 
 from .client import ZaviaClient, ZaviaError
 from .health import check_site
+from .report import REPORTS_DIR, latest_report_info, list_reports
 from .seo import check_sitemap
 
 app = Flask(__name__)
@@ -83,6 +85,58 @@ PAGE = """<!doctype html>
 <form method="post" action="/seo"><button type="submit">Run SEO check</button></form>
 {% if seo_msg %}<p class="msg">{{ seo_msg }}</p>{% endif %}
 </div>
+
+<div class="card">
+<h2>SEO audit reports</h2>
+{% if reports %}
+  <p>Latest report: <strong>{{ reports.date }}</strong>
+  {% if reports.counts %}
+    — {{ reports.counts.total_issues }} issues ({{ reports.counts.fail_issues }} FAIL, {{ reports.counts.warn_issues }} warnings), {{ reports.counts.articles_checked }} articles checked.
+    <span class="{{ 'ok' if reports.ok else 'bad' }}">{{ 'No FAIL issues' if reports.ok else 'FAIL issues need fixing' }}</span>
+  {% endif %}
+  </p>
+  {% if reports.html %}<p><a href="/reports/{{ reports.html }}">View the latest report (HTML)</a></p>{% endif %}
+{% else %}
+  <p>No SEO audit report yet. Run one from the command line:</p>
+  <p><code>python -m zavia_agent.cli --seo-report</code></p>
+{% endif %}
+<p><a href="/reports">All reports</a></p>
+</div>
+</body>
+</html>
+"""
+
+REPORTS_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zavia Agent — SEO audit reports</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; background: #fafaf7; }
+  h1 { font-size: 1.6rem; }
+  .card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 1rem 1.2rem; margin: 1rem 0; }
+  .note { color: #555; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>SEO audit reports</h1>
+<p><a href="/">&larr; Back to the dashboard</a></p>
+<div class="card">
+{% if reports %}
+  <ul>
+  {% for report in reports %}
+    <li><strong>{{ report.date }}</strong> —
+      {% if report.html %}<a href="/reports/{{ report.html }}">HTML</a>{% endif %}{% if report.md and report.html %} &middot; {% endif %}{% if report.md %}<a href="/reports/{{ report.md }}">Markdown</a>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+{% else %}
+  <p>No reports yet. Run one from the command line:</p>
+  <p><code>python -m zavia_agent.cli --seo-report</code></p>
+{% endif %}
+<p class="note">Reports are written by the scheduled-style audit (Lesson 14 pattern). Each run compares with the previous one — new, fixed and ongoing issues. Run it again any time to get a fresh report.</p>
+</div>
 </body>
 </html>
 """
@@ -109,8 +163,31 @@ def home():
     return render_template_string(
         PAGE, health=health, health_error=health_error,
         article_count=article_count, token_set=bool(client.token),
-        publish_msg="", seo_msg="",
+        publish_msg="", seo_msg="", reports=latest_report_info(),
     )
+
+
+@app.route("/reports", methods=["GET"])
+def reports():
+    """List all saved SEO audit reports, newest first."""
+    return render_template_string(REPORTS_PAGE, reports=list_reports())
+
+
+@app.route("/reports/<name>", methods=["GET"])
+def report_file(name):
+    """Serve one saved report file (HTML or Markdown).
+
+    Only plain filenames inside reports/ are allowed — no subfolders,
+    no other file types, no path tricks.
+    """
+    if "/" in name or "\\" in name or ".." in name:
+        abort(404)
+    if not (name.endswith(".html") or name.endswith(".md")):
+        abort(404)
+    path = os.path.join(REPORTS_DIR, name)
+    if not os.path.isfile(path):
+        abort(404)
+    return send_from_directory(REPORTS_DIR, name)
 
 
 @app.route("/publish", methods=["POST"])
@@ -143,6 +220,7 @@ def publish():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg=msg, seo_msg="",
+        reports=latest_report_info(),
     )
 
 
@@ -170,12 +248,13 @@ def seo():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg="", seo_msg=msg,
+        reports=latest_report_info(),
     )
 
 
 def main():
     port = int(os.environ.get("PORT", "5000"))
-    print("Zavia Agent dashboard — open http://127.0.0.1:5000 in your browser.")
+    print(f"Zavia Agent dashboard — open http://127.0.0.1:{port} in your browser.")
     app.run(host="127.0.0.1", port=port, debug=False)
 
 

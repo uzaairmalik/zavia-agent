@@ -3,13 +3,14 @@
 A small, friendly, ready-to-use agent for the **Zavia blog**
 ([zaviamagazine.dev](https://zaviamagazine.dev)).
 
-It does five useful jobs, and nothing else:
+It does six useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
 3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once
 4. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
-5. **Web dashboard** — the same jobs in your browser
+5. **SEO audit report** — a repeatable full-site audit (Lesson 14 pattern) that writes a dated Markdown + HTML report and compares it with the previous run: what improved, what got worse, what is new
+6. **Web dashboard** — the same jobs in your browser, plus the latest SEO audit report
 
 Built for Uzair (BCS student, Pakistan). Simple English, a little Roman
 Urdu where natural, and it never crashes on a bad input — it explains
@@ -56,6 +57,7 @@ python -m zavia_agent.cli
   6  Show config / status
   7  Find junk / test articles (to delete)
   8  Bulk SEO check (several article slugs at once)
+  9  SEO audit report (full audit + dated report file)
   0  Exit
 =============================================
 ```
@@ -67,6 +69,7 @@ python -m zavia_agent.cli --health
 python -m zavia_agent.cli --seo
 python -m zavia_agent.cli --seo --article my-article-slug
 python -m zavia_agent.cli --seo --articles slug-one,slug-two,slug-three
+python -m zavia_agent.cli --seo-report
 python -m zavia_agent.cli --junk
 python -m zavia_agent.cli --list
 python -m zavia_agent.cli --publish examples/sample-article.md
@@ -90,6 +93,49 @@ failure — the article still loads, it just looks worse in search
 results and link previews. A missing title, canonical, or a 404 is a
 failure (exit code 1).
 
+### SEO audit reports (scheduled, Lesson 14 pattern)
+
+Hisham's Lesson 14 (Learn Claude AI in 30 Days, Module 7) runs an SEO
+audit on a schedule — his re-audits every Thursday 11:00 AM, with a
+progress report Mon/Wed/Fri — and tracks what changed since the last
+run. This agent does Zavia's version of that:
+
+```bash
+python -m zavia_agent.cli --seo-report
+```
+
+One run audits the whole live site (sitemap reachability + URL count,
+duplicate slugs, a sample of URLs for broken links, **every** article
+for title/canonical/meta-description/OG tags, and the junk-article
+finder), then writes a dated report — Markdown + HTML — under
+`reports/` (e.g. `seo-report-2026-11-17-1206.md`) and stores the
+result in `state/last-audit.json` (gitignored) for the next
+comparison. The report shows what was checked, every issue found
+(with slugs/URLs), and — from the second run on — what improved
+(fixed), what got worse (new failures), what is new, and how the
+counts moved. The first run has no previous report, and says so
+plainly. Exit code is 1 when a FAIL issue is found, 0 otherwise.
+
+Suggested schedule (run the same command each time; every run audits
+fresh and compares with the previous one):
+
+```cron
+# Thursday 11:00 — the weekly re-audit
+0 11 * * 4  cd /path/to/zavia-agent && .venv/bin/python -m zavia_agent.cli --seo-report
+# Mon/Wed/Fri 09:00 — progress reports
+0 9 * * 1,3,5  cd /path/to/zavia-agent && .venv/bin/python -m zavia_agent.cli --seo-report
+```
+
+No cron job is created by this agent — add the lines above yourself
+if you want them. Every number in a report comes from a real check:
+no invented scores, and no keyword-rank data (Zavia has no Search
+Console connection here, so ranks are not claimed).
+
+**Email delivery is a documented next step, not built yet.** Hisham's
+version emails the report; this agent only writes the report files
+and shows the latest one on the dashboard. Sending it by email needs
+Uzair's Gmail approval flow, so it stays manual until that is set up.
+
 ### Web dashboard
 
 ```bash
@@ -98,7 +144,9 @@ python -m zavia_agent.web
 ```
 
 Home page shows site health + article count, a form to publish an
-article, and a button to run the SEO check.
+article, a button to run the SEO check, and the latest SEO audit
+report with a link to the full HTML report. `/reports` lists all
+saved reports (newest first).
 
 ### Smoke test (no token needed)
 
@@ -106,6 +154,10 @@ article, and a button to run the SEO check.
 python test_smoke.py
 # [PASS] Homepage returns 200 with article cards
 # [PASS] Sitemap reachable and lists URLs
+
+python test_report.py
+# [PASS] New vs fixed vs ongoing classification
+# ... (8 checks, no network needed)
 ```
 
 ---
@@ -206,15 +258,19 @@ zavia-agent/
 │   ├── client.py       # Zavia API client (publish/update/sitemap/homepage)
 │   ├── health.py       # site health checks (with retries for DB flaps)
 │   ├── seo.py          # sitemap + article SEO checks
+│   ├── report.py       # repeatable SEO audit + dated reports (Lesson 14 pattern)
 │   ├── cli.py          # interactive menu + --flags
 │   └── web.py          # tiny Flask dashboard (port 5000)
 ├── examples/
 │   └── sample-article.md
+├── reports/            # dated SEO audit reports (Markdown + HTML; gitignored, local only)
+├── state/              # last-audit.json for report comparisons (gitignored, local only)
 ├── test_smoke.py       # dry-run health check, no token needed
+├── test_report.py      # report comparison logic tests, no network needed
 ├── IMPROVEMENTS.md     # one line per daily improvement (date + commit)
 ├── requirements.txt    # requests + flask only
 ├── .env.example        # copy to .env, add your token
-├── .gitignore          # keeps .env out of git
+├── .gitignore          # keeps .env, reports/ and state/ out of git
 └── README.md
 ```
 

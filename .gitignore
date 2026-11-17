@@ -1,6 +1,11 @@
 # Secrets — never commit these.
 .env
 
+# Generated local truth — audit reports and comparison state.
+# These live only on this machine; a fresh clone starts with no reports.
+reports/
+state/
+
 # Python
 __pycache__/
 *.pyc
