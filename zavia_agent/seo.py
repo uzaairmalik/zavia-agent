@@ -6,14 +6,26 @@
   <title> is present, that a canonical link is present, and that it has
   a meta description + Open Graph tags (warnings, not failures).
 - check_articles(slugs): same checks for several slugs at once.
+- check_links(slug=None): fetch one article page (or the homepage when
+  no slug is given), find its internal links, and report any that
+  return a non-200 status — broken internal links hurt SEO.
 
 Nothing here needs a token — these are plain public-page checks.
 """
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from .client import ZaviaClient, ZaviaError
+
+# Internal hosts for Zavia (custom domain + the Vercel URL the API uses).
+INTERNAL_HOSTS = ("zaviamagazine.dev", "zavia-magazine.vercel.app")
+# Link targets that are not content pages — checking them would cry wolf
+# (API routes need a POST, static chunks move between deploys, assets are
+# not SEO links). The scan checks internal PAGE links only.
+SKIP_PREFIXES = ("/api/", "/_next/")
+SKIP_EXTENSIONS = (".js", ".css", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".pdf", ".xml", ".woff", ".woff2")
+LINK_HREF_RE = re.compile(r'<a\s[^>]*href=["\']([^"\']+)["\']', re.IGNORECASE)
 
 CANONICAL_RE = re.compile(r'<link[^>]+rel=["\']canonical["\'][^>]*>', re.IGNORECASE)
 HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -289,3 +301,109 @@ KNOWN_JUNK_SLUGS = (
 def check_article_by_slug(slug, client=None):
     """Convenience wrapper that builds a client when none is given."""
     return check_article(client or ZaviaClient(), slug)
+
+
+def _internal_page_links(html, page_url):
+    """Pull the internal PAGE links out of a page's HTML.
+
+    Keeps: relative links ("/article/...", "/guides/...") and absolute
+    links to Zavia's own hosts. Drops: anchors (#...), mailto:/tel:/
+    javascript:, links to other sites, API routes, /_next/ chunks and
+    asset files (images, scripts, stylesheets, PDFs). Returns a list of
+    unique absolute URLs, in the order they first appear.
+    """
+    seen = []
+    seen_set = set()
+    for href in LINK_HREF_RE.findall(html or ""):
+        href = (href or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        absolute = urljoin(page_url, href)
+        parsed = urlparse(absolute)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if parsed.netloc and parsed.netloc not in INTERNAL_HOSTS:
+            continue  # external link — not this scan's job
+        path = parsed.path or "/"
+        lowered = path.lower()
+        if lowered.startswith(SKIP_PREFIXES):
+            continue
+        if any(lowered.endswith(ext) for ext in SKIP_EXTENSIONS):
+            continue
+        # Drop the #fragment — two links to the same page are one check.
+        clean = f"{parsed.scheme}://{parsed.netloc}{path}"
+        if parsed.query:
+            clean += "?" + parsed.query
+        if clean not in seen_set:
+            seen_set.add(clean)
+            seen.append(clean)
+    return seen
+
+
+def check_links(client=None, slug=None, max_links=60, timeout=10):
+    """Scan one page's internal links and report the broken ones.
+
+    slug: an article slug to scan, or None to scan the homepage.
+    Only internal page links are checked (see _internal_page_links);
+    at most max_links are fetched so a link-heavy page stays quick.
+
+    Returns a dict:
+    {
+      "page_url": str, "page_status": int|None,
+      "links": [{"url": str, "status": int|None, "error": str|None}, ...],
+      "broken": [{"url": str, "status": int|None, "error": str|None}, ...],
+      "checked": int, "skipped": int,   # skipped = found but over max_links
+      "ok": bool,   # True when the page loaded AND no link is broken
+      "summary": str,
+    }
+    Broken means a non-200 status or a request that failed outright.
+    """
+    client = client or ZaviaClient()
+    if slug:
+        info = client.get_article(slug)
+        page_url, page_status, html = info["url"], info["status"], info.get("html") or ""
+    else:
+        page_url = client.base_url + "/"
+        try:
+            resp = client.session.get(page_url, timeout=timeout)
+            page_status, html = resp.status_code, resp.text
+        except Exception as exc:  # network error, timeout, DNS, ...
+            return {
+                "page_url": page_url, "page_status": None, "links": [],
+                "broken": [], "checked": 0, "skipped": 0, "ok": False,
+                "summary": f"Homepage could not be loaded: {str(exc)[:120]}",
+            }
+    if page_status != 200:
+        return {
+            "page_url": page_url, "page_status": page_status, "links": [],
+            "broken": [], "checked": 0, "skipped": 0, "ok": False,
+            "summary": f"Page {page_url} returned HTTP {page_status} — cannot scan its links.",
+        }
+    urls = _internal_page_links(html, page_url)
+    to_check, skipped = urls[:max_links], max(0, len(urls) - max_links)
+    links = []
+    broken = []
+    for url in to_check:
+        try:
+            # Plain session GET (no client retries — a link that needs
+            # three attempts is slow enough to count as broken anyway).
+            resp = client.session.get(url, timeout=timeout)
+            status, error = resp.status_code, None
+        except Exception as exc:
+            status, error = None, str(exc)[:120]
+        links.append({"url": url, "status": status, "error": error})
+        if status != 200:
+            broken.append({"url": url, "status": status, "error": error})
+    ok = not broken
+    parts = [f"Scanned {len(links)} internal link(s) on {page_url}"]
+    if broken:
+        parts.append(f"{len(broken)} broken: " + ", ".join(b["url"] for b in broken))
+    else:
+        parts.append("all returned 200")
+    if skipped:
+        parts.append(f"{skipped} more link(s) skipped (over the {max_links} cap)")
+    return {
+        "page_url": page_url, "page_status": page_status, "links": links,
+        "broken": broken, "checked": len(links), "skipped": skipped,
+        "ok": ok, "summary": "; ".join(parts) + ".",
+    }

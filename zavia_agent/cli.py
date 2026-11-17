@@ -7,7 +7,8 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --health
     python -m zavia_agent.cli --seo
     python -m zavia_agent.cli --seo --articles slug-one,slug-two
-    python -m zavia_agent.cli --seo-report
+    python -m zavia_agent.cli --links my-article-slug
+    python -m zavia_agent.cli --links   (scan the homepage's links)
     python -m zavia_agent.cli --list
     python -m zavia_agent.cli --publish examples/sample-article.md
     python -m zavia_agent.cli --update update.json
@@ -24,8 +25,7 @@ import sys
 
 from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
-from .report import compare_reports, load_previous_state, run_audit, write_report
-from .seo import check_article, check_articles, check_sitemap, find_junk_articles
+from .seo import check_article, check_articles, check_links, check_sitemap, find_junk_articles
 
 
 # ---------------------------------------------------------------- front-matter
@@ -170,6 +170,24 @@ def do_bulk_seo(client, slugs):
     return report
 
 
+def do_links(client, slug=None):
+    """Scan one page's internal links; print each broken one.
+
+    Returns the report dict (so --links can exit non-zero when a
+    link is broken).
+    """
+    label = f"article '{slug}'" if slug else "the homepage"
+    print(f"\nScanning the internal links on {label}...")
+    report = check_links(client, slug)
+    print("\n" + report["summary"])
+    if report["broken"]:
+        print("Broken links (fix or remove these — they hurt SEO):")
+        for item in report["broken"]:
+            detail = f"HTTP {item['status']}" if item["status"] else f"error: {item['error']}"
+            print(f"  - {item['url']}  ({detail})")
+    return report
+
+
 def do_config(client):
     print("\nConfig / status")
     print(f"  Site (base URL): {client.base_url}")
@@ -190,39 +208,6 @@ def do_junk(client):
         print("After deleting, they 404 and drop out — that is expected, not a problem.")
 
 
-def do_seo_report(client):
-    """Full SEO audit + dated report (Lesson 14 pattern).
-
-    Runs the audit, compares with the previous run (if any), writes a
-    dated Markdown + HTML report under reports/, and saves the state
-    for the next comparison. Non-interactive — safe to run from cron.
-    Returns the audit dict.
-    """
-    print("\nRunning the full SEO audit (sitemap + every article + junk check)...")
-    print("This takes a minute or two — one request per article.")
-    previous = load_previous_state()
-    audit = run_audit(client)
-    comparison = compare_reports(previous, audit)
-    paths = write_report(audit, comparison)
-    counts = audit["counts"]
-    print("\n" + audit["checks"]["sitemap"])
-    print(audit["checks"]["articles"])
-    print(audit["checks"]["junk"])
-    print(f"\nIssues: {counts['total_issues']} total "
-          f"({counts['fail_issues']} FAIL, {counts['warn_issues']} warnings).")
-    if comparison["first_run"]:
-        print("First audit run — no previous report to compare with yet.")
-    else:
-        print(f"Since the last report ({comparison['previous_date']}): "
-              f"{len(comparison['improved'])} fixed, "
-              f"{len(comparison['worse'])} new failures, "
-              f"{len(comparison['new'])} new issues.")
-    print("\nReport written:")
-    print("  " + paths["md"])
-    print("  " + paths["html"])
-    return audit
-
-
 # ---------------------------------------------------------------- menu
 MENU = """
 ================ ZAVIA AGENT ================
@@ -234,7 +219,7 @@ MENU = """
   6  Show config / status
   7  Find junk / test articles (to delete)
   8  Bulk SEO check (several article slugs at once)
-  9  SEO audit report (full audit + dated report file)
+  9  Broken-link scan (one article's internal links)
   0  Exit
 =============================================
 """
@@ -282,7 +267,8 @@ def interactive(client):
                 else:
                     do_bulk_seo(client, slugs)
             elif choice == "9":
-                do_seo_report(client)
+                slug = input("Article slug to scan (or press Enter for the homepage): ").strip()
+                do_links(client, slug or None)
             else:
                 print(f"'{choice}' is not on the menu. Pick a number 0-9.")
         except FileNotFoundError as exc:
@@ -301,13 +287,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="zavia-agent", description="Interactive agent for the Zavia blog.")
     parser.add_argument("--health", action="store_true", help="Run the health check and exit.")
     parser.add_argument("--seo", action="store_true", help="Run the SEO check and exit.")
-    parser.add_argument("--seo-report", action="store_true",
-                        help="Run the full SEO audit and write a dated report under reports/ (Lesson 14 pattern; safe for cron).")
     parser.add_argument("--junk", action="store_true", help="Find test/junk articles in the sitemap and exit.")
     parser.add_argument("--list", action="store_true", help="List recent articles and exit.")
     parser.add_argument("--publish", metavar="FILE", help="Publish an article from a Markdown file and exit.")
     parser.add_argument("--update", metavar="FILE", help="Update an article from a JSON file and exit.")
     parser.add_argument("--config", action="store_true", help="Show config/status and exit.")
+    parser.add_argument("--links", metavar="SLUG", nargs="?", const="",
+                        help="Scan one article's internal links for broken ones (no SLUG = scan the homepage) and exit.")
     parser.add_argument("--article", metavar="SLUG", help="With --seo: also check this one article slug in detail.")
     parser.add_argument("--articles", metavar="SLUGS", help="With --seo: check several article slugs at once, comma-separated (title, canonical, meta description, OG tags).")
     args = parser.parse_args(argv)
@@ -317,9 +303,6 @@ def main(argv=None):
         if args.health:
             do_health(client)
             return 0
-        if args.seo_report:
-            audit = do_seo_report(client)
-            return 0 if audit["ok"] else 1
         if args.junk:
             do_junk(client)
             return 0
@@ -341,6 +324,9 @@ def main(argv=None):
                     print("  - " + url)
             if args.article:
                 print(check_article(client, args.article)["summary"])
+            return 0 if report["ok"] else 1
+        if args.links is not None:
+            report = do_links(client, args.links or None)
             return 0 if report["ok"] else 1
         if args.list:
             do_list(client)
