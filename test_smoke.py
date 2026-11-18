@@ -3,6 +3,7 @@
 Checks the LIVE site with plain public requests only:
   1. Homepage returns 200 and shows article cards.
   2. Sitemap is reachable and lists URLs.
+  3. Full SEO audit runs (sample of 3 articles) and returns counts.
 
 Run it:
     python test_smoke.py
@@ -15,6 +16,7 @@ import sys
 sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 
 from zavia_agent.client import ZaviaClient, ZaviaError
+from zavia_agent.seo import check_sitemap_seo
 
 
 def main():
@@ -38,6 +40,15 @@ def main():
     except ZaviaError as exc:
         ok, detail = False, str(exc)
     results.append(("Sitemap reachable and lists URLs", ok, detail))
+
+    # 3. Full SEO audit (sample of 3 — the real audit checks all of them)
+    try:
+        report = check_sitemap_seo(client, limit=3)
+        ok = report["checked"] == 3 and "failed" in report and "warned" in report
+        detail = f"{report['checked']} articles checked, {report['failed']} failed, {report['warned']} with warnings"
+    except ZaviaError as exc:
+        ok, detail = False, str(exc)
+    results.append(("Full SEO audit runs (sample of 3 articles)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

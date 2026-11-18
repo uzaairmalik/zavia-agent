@@ -7,6 +7,7 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --health
     python -m zavia_agent.cli --seo
     python -m zavia_agent.cli --seo --articles slug-one,slug-two
+    python -m zavia_agent.cli --seo --all
     python -m zavia_agent.cli --links my-article-slug
     python -m zavia_agent.cli --links   (scan the homepage's links)
     python -m zavia_agent.cli --list
@@ -25,7 +26,7 @@ import sys
 
 from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
-from .seo import check_article, check_articles, check_links, check_sitemap, find_junk_articles
+from .seo import check_article, check_articles, check_links, check_sitemap, check_sitemap_seo, find_junk_articles
 
 
 # ---------------------------------------------------------------- front-matter
@@ -170,6 +171,41 @@ def do_bulk_seo(client, slugs):
     return report
 
 
+def do_seo_all(client):
+    """Check SEO tags on every article in the sitemap.
+
+    Only the articles with a problem are printed one by one — the
+    clean ones just count towards the summary, so the output stays
+    short even with 70+ articles.
+
+    Returns the report dict (so --seo --all can exit non-zero when an
+    article fails its title/canonical check).
+    """
+    print("\nFull SEO audit — checking every article in the sitemap (title, canonical, meta description, OG tags)...")
+    print("This takes a minute or so — one quick request per article.")
+    last_shown = [0]
+
+    def _progress(done, total):
+        # A short line every 10 articles, so you know it is still working.
+        if done % 10 == 0 or done == total:
+            print(f"  ... {done}/{total} checked")
+            last_shown[0] = done
+
+    report = check_sitemap_seo(client, progress=_progress)
+    if report["failed"]:
+        print("\nFailed (missing title/canonical, or a 404) — fix these first:")
+        for result in report["results"]:
+            if not result["ok"]:
+                print(f"  - {result['slug']} — {result['summary']}")
+    if report["warned"]:
+        print("\nWarnings (article loads, but looks worse in search / link previews):")
+        for result in report["results"]:
+            if result["ok"] and result["warnings"]:
+                print(f"  - {result['slug']} — " + "; ".join(result["warnings"]))
+    print("\n" + report["summary"])
+    return report
+
+
 def do_links(client, slug=None):
     """Scan one page's internal links; print each broken one.
 
@@ -220,6 +256,7 @@ MENU = """
   7  Find junk / test articles (to delete)
   8  Bulk SEO check (several article slugs at once)
   9  Broken-link scan (one article's internal links)
+ 10  Full SEO audit (every article in the sitemap)
   0  Exit
 =============================================
 """
@@ -269,8 +306,10 @@ def interactive(client):
             elif choice == "9":
                 slug = input("Article slug to scan (or press Enter for the homepage): ").strip()
                 do_links(client, slug or None)
+            elif choice == "10":
+                do_seo_all(client)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-9.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-10.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -296,6 +335,7 @@ def main(argv=None):
                         help="Scan one article's internal links for broken ones (no SLUG = scan the homepage) and exit.")
     parser.add_argument("--article", metavar="SLUG", help="With --seo: also check this one article slug in detail.")
     parser.add_argument("--articles", metavar="SLUGS", help="With --seo: check several article slugs at once, comma-separated (title, canonical, meta description, OG tags).")
+    parser.add_argument("--all", action="store_true", help="With --seo: check EVERY article in the sitemap (full SEO audit).")
     args = parser.parse_args(argv)
 
     client = ZaviaClient()
@@ -307,6 +347,9 @@ def main(argv=None):
             do_junk(client)
             return 0
         if args.seo:
+            if args.all:
+                report = do_seo_all(client)
+                return 0 if report["ok"] else 1
             if args.articles:
                 slugs = [s.strip() for s in args.articles.split(",") if s.strip()]
                 if not slugs:

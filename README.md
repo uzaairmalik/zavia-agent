@@ -3,14 +3,15 @@
 A small, friendly, ready-to-use agent for the **Zavia blog**
 ([zaviamagazine.dev](https://zaviamagazine.dev)).
 
-It does six useful jobs, and nothing else:
+It does seven useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
 3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once
-4. **Broken-link scan** — one article's (or the homepage's) internal links, so dead links get fixed before Google finds them
-5. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
-6. **Web dashboard** — the same jobs in your browser
+4. **Full SEO audit** — the same title/canonical/description/OG check on *every* article in the sitemap, so nothing gets forgotten
+5. **Broken-link scan** — one article's (or the homepage's) internal links, so dead links get fixed before Google finds them
+6. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
+7. **Web dashboard** — the same jobs in your browser
 
 Built for Uzair (BCS student, Pakistan). Simple English, a little Roman
 Urdu where natural, and it never crashes on a bad input — it explains
@@ -58,6 +59,7 @@ python -m zavia_agent.cli
   7  Find junk / test articles (to delete)
   8  Bulk SEO check (several article slugs at once)
   9  Broken-link scan (one article's internal links)
+ 10  Full SEO audit (every article in the sitemap)
   0  Exit
 =============================================
 ```
@@ -69,6 +71,7 @@ python -m zavia_agent.cli --health
 python -m zavia_agent.cli --seo
 python -m zavia_agent.cli --seo --article my-article-slug
 python -m zavia_agent.cli --seo --articles slug-one,slug-two,slug-three
+python -m zavia_agent.cli --seo --all   # full audit: every article in the sitemap
 python -m zavia_agent.cli --links my-article-slug
 python -m zavia_agent.cli --links   # scan the homepage's links
 python -m zavia_agent.cli --junk
@@ -93,6 +96,24 @@ link previews). A missing description or OG tag is a **warning**, not a
 failure — the article still loads, it just looks worse in search
 results and link previews. A missing title, canonical, or a 404 is a
 failure (exit code 1).
+
+### Full SEO audit (every article in the sitemap)
+
+```bash
+python -m zavia_agent.cli --seo --all
+# Full SEO audit — checking every article in the sitemap...
+#   ... 10/68 checked
+#   ... 20/68 checked
+# Checked 68 article(s) from the sitemap; 2 with warnings: slug-one, slug-two.
+```
+
+Same checks as the bulk check, but the slugs come from the sitemap —
+you type nothing. Run it once a week as a sweep: it catches the
+articles you forgot to check one by one. Only the articles with a
+problem are listed one by one; the clean ones just count towards the
+summary. Exit code is 1 when any article fails (missing title,
+canonical, or a 404), so you can run it in a script. It takes about a
+minute (one quick request per article).
 
 ### Broken-link scan (one article's internal links)
 
@@ -125,6 +146,7 @@ article, and a button to run the SEO check.
 python test_smoke.py
 # [PASS] Homepage returns 200 with article cards
 # [PASS] Sitemap reachable and lists URLs
+# [PASS] Full SEO audit runs (sample of 3 articles)
 ```
 
 ---

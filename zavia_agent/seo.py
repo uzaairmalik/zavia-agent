@@ -6,6 +6,8 @@
   <title> is present, that a canonical link is present, and that it has
   a meta description + Open Graph tags (warnings, not failures).
 - check_articles(slugs): same checks for several slugs at once.
+- check_sitemap_seo(): same checks for EVERY article in the sitemap
+  (a weekly sweep — no slug list to type).
 - check_links(slug=None): fetch one article page (or the homepage when
   no slug is given), find its internal links, and report any that
   return a non-200 status — broken internal links hurt SEO.
@@ -176,6 +178,19 @@ def check_article(client, slug):
     }
 
 
+def _failed_result(slug, exc):
+    """A check_article-shaped dict for an article that could not be checked."""
+    return {
+        "slug": slug, "url": "", "status": None, "title": "",
+        "title_found": False, "canonical": None,
+        "canonical_found": False, "description": "",
+        "description_found": False, "og_title_found": False,
+        "og_description_found": False,
+        "warnings": [], "ok": False,
+        "summary": f"Article '{slug}' could not be checked: {exc}",
+    }
+
+
 def check_articles(client, slugs):
     """Check several article slugs at once (bulk SEO check).
 
@@ -199,15 +214,7 @@ def check_articles(client, slugs):
         try:
             results.append(check_article(client, slug))
         except ZaviaError as exc:
-            results.append({
-                "slug": slug, "url": "", "status": None, "title": "",
-                "title_found": False, "canonical": None,
-                "canonical_found": False, "description": "",
-                "description_found": False, "og_title_found": False,
-                "og_description_found": False,
-                "warnings": [], "ok": False,
-                "summary": f"Article '{slug}' could not be checked: {exc}",
-            })
+            results.append(_failed_result(slug, exc))
     failed = [r for r in results if not r["ok"]]
     warned = [r for r in results if r["ok"] and r["warnings"]]
     ok = not failed
@@ -223,6 +230,68 @@ def check_articles(client, slugs):
         "checked": len(results),
         "failed": len(failed),
         "warned": len(warned),
+        "ok": ok,
+        "summary": "; ".join(parts) + ".",
+    }
+
+
+def check_sitemap_seo(client=None, limit=150, progress=None):
+    """Check SEO tags on EVERY article in the sitemap.
+
+    Same per-article checks as check_articles (title, canonical, meta
+    description, OG tags), but the slugs come from the sitemap itself —
+    no list to type. A weekly sweep: it catches the articles Uzair
+    forgot to check one by one.
+
+    limit: max articles to check (the sitemap holds ~70 articles; the
+    cap keeps a bad day quick). progress: optional callback called as
+    progress(done, total) after each article.
+
+    Returns a dict:
+    {
+      "results": [check_article(...) dict, ...],
+      "checked": int, "failed": int, "warned": int,
+      "failed_slugs": [slug, ...], "warned_slugs": [slug, ...],
+      "ok": bool,   # True only when no article failed title/canonical
+      "summary": str,
+    }
+    """
+    client = client or ZaviaClient()
+    urls = client.get_sitemap_urls()
+    article_urls = [u for u in urls if "/article/" in urlparse(u).path]
+    slugs = []
+    seen = set()
+    for url in article_urls:
+        slug = _slug_of(url)
+        if slug and slug not in seen:
+            seen.add(slug)
+            slugs.append(slug)
+    slugs = slugs[:limit]
+    results = []
+    for i, slug in enumerate(slugs, 1):
+        try:
+            results.append(check_article(client, slug))
+        except ZaviaError as exc:
+            results.append(_failed_result(slug, exc))
+        if progress:
+            progress(i, len(slugs))
+    failed = [r for r in results if not r["ok"]]
+    warned = [r for r in results if r["ok"] and r["warnings"]]
+    ok = not failed
+    parts = [f"Checked {len(results)} article(s) from the sitemap"]
+    if failed:
+        parts.append(f"{len(failed)} failed: " + ", ".join(r["slug"] for r in failed))
+    if warned:
+        parts.append(f"{len(warned)} with warnings: " + ", ".join(r["slug"] for r in warned))
+    if not failed and not warned:
+        parts.append("all OK — titles, canonicals, meta descriptions and OG tags present")
+    return {
+        "results": results,
+        "checked": len(results),
+        "failed": len(failed),
+        "warned": len(warned),
+        "failed_slugs": [r["slug"] for r in failed],
+        "warned_slugs": [r["slug"] for r in warned],
         "ok": ok,
         "summary": "; ".join(parts) + ".",
     }
