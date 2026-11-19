@@ -3,7 +3,7 @@
 A small, friendly, ready-to-use agent for the **Zavia blog**
 ([zaviamagazine.dev](https://zaviamagazine.dev)).
 
-It does seven useful jobs, and nothing else:
+It does eight useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
@@ -11,7 +11,8 @@ It does seven useful jobs, and nothing else:
 4. **Full SEO audit** — the same title/canonical/description/OG check on *every* article in the sitemap, so nothing gets forgotten
 5. **Broken-link scan** — one article's (or the homepage's) internal links, so dead links get fixed before Google finds them
 6. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
-7. **Web dashboard** — the same jobs in your browser
+7. **Save an SEO report** — a bulk check or full audit saved as a dated Markdown file, so you have a record to look back at
+8. **Web dashboard** — the same jobs in your browser
 
 Built for Uzair (BCS student, Pakistan). Simple English, a little Roman
 Urdu where natural, and it never crashes on a bad input — it explains
@@ -60,6 +61,7 @@ python -m zavia_agent.cli
   8  Bulk SEO check (several article slugs at once)
   9  Broken-link scan (one article's internal links)
  10  Full SEO audit (every article in the sitemap)
+ 11  Full SEO audit + save report to a file
   0  Exit
 =============================================
 ```
@@ -72,6 +74,8 @@ python -m zavia_agent.cli --seo
 python -m zavia_agent.cli --seo --article my-article-slug
 python -m zavia_agent.cli --seo --articles slug-one,slug-two,slug-three
 python -m zavia_agent.cli --seo --all   # full audit: every article in the sitemap
+python -m zavia_agent.cli --seo --all --report        # same audit, saved as zavia-seo-report-<today>.md
+python -m zavia_agent.cli --seo --articles slug-one,slug-two --report my-report.md
 python -m zavia_agent.cli --links my-article-slug
 python -m zavia_agent.cli --links   # scan the homepage's links
 python -m zavia_agent.cli --junk
@@ -115,6 +119,24 @@ summary. Exit code is 1 when any article fails (missing title,
 canonical, or a 404), so you can run it in a script. It takes about a
 minute (one quick request per article).
 
+### Save an SEO report to a file
+
+```bash
+python -m zavia_agent.cli --seo --all --report
+# Report saved to: /home/uzair/zavia-agent/zavia-seo-report-2026-11-19.md
+
+python -m zavia_agent.cli --seo --articles slug-one,slug-two --report my-report.md
+```
+
+Works with the full audit (`--seo --all`, menu 10/11) and the bulk
+check (`--seo --articles`, menu 8). With no file name after `--report`
+it saves as `zavia-seo-report-<today's date>.md` in the folder you run
+it from. The file lists the summary, every failed article with its
+problem, every article with a warning, and the clean ones as a short
+list — so you can keep one report per day and compare them over time.
+The report file is yours to keep; it is not part of the repo, and
+nothing is uploaded anywhere.
+
 ### Broken-link scan (one article's internal links)
 
 ```bash
@@ -147,6 +169,7 @@ python test_smoke.py
 # [PASS] Homepage returns 200 with article cards
 # [PASS] Sitemap reachable and lists URLs
 # [PASS] Full SEO audit runs (sample of 3 articles)
+# [PASS] SEO report export writes a Markdown file
 ```
 
 ---
@@ -247,6 +270,7 @@ zavia-agent/
 │   ├── client.py       # Zavia API client (publish/update/sitemap/homepage)
 │   ├── health.py       # site health checks (with retries for DB flaps)
 │   ├── seo.py          # sitemap + article SEO checks
+│   ├── report.py       # save an SEO check as a Markdown report file
 │   ├── cli.py          # interactive menu + --flags
 │   └── web.py          # tiny Flask dashboard (port 5000)
 ├── examples/

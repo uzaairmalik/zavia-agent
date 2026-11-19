@@ -8,6 +8,8 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --seo
     python -m zavia_agent.cli --seo --articles slug-one,slug-two
     python -m zavia_agent.cli --seo --all
+    python -m zavia_agent.cli --seo --all --report        (save the audit as a Markdown file)
+    python -m zavia_agent.cli --seo --articles a,b --report my-report.md
     python -m zavia_agent.cli --links my-article-slug
     python -m zavia_agent.cli --links   (scan the homepage's links)
     python -m zavia_agent.cli --list
@@ -26,6 +28,7 @@ import sys
 
 from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
+from .report import default_report_path, write_seo_report
 from .seo import check_article, check_articles, check_links, check_sitemap, check_sitemap_seo, find_junk_articles
 
 
@@ -151,7 +154,13 @@ def do_seo(client):
         print("\n" + info["summary"])
 
 
-def do_bulk_seo(client, slugs):
+def _save_report(report, report_path, client):
+    """Write an SEO report to a file and say where it went."""
+    path = write_seo_report(report, report_path, site=client.base_url)
+    print(f"\nReport saved to: {path}")
+
+
+def do_bulk_seo(client, slugs, report_path=None):
     """Check several article slugs at once; print one line per article.
 
     Returns the report dict (so --seo --articles can exit non-zero
@@ -168,10 +177,12 @@ def do_bulk_seo(client, slugs):
             line += " — " + result["summary"]
         print(line)
     print("\n" + report["summary"])
+    if report_path is not None:
+        _save_report(report, report_path, client)
     return report
 
 
-def do_seo_all(client):
+def do_seo_all(client, report_path=None):
     """Check SEO tags on every article in the sitemap.
 
     Only the articles with a problem are printed one by one — the
@@ -203,6 +214,8 @@ def do_seo_all(client):
             if result["ok"] and result["warnings"]:
                 print(f"  - {result['slug']} — " + "; ".join(result["warnings"]))
     print("\n" + report["summary"])
+    if report_path is not None:
+        _save_report(report, report_path, client)
     return report
 
 
@@ -257,6 +270,7 @@ MENU = """
   8  Bulk SEO check (several article slugs at once)
   9  Broken-link scan (one article's internal links)
  10  Full SEO audit (every article in the sitemap)
+ 11  Full SEO audit + save report to a file
   0  Exit
 =============================================
 """
@@ -308,8 +322,10 @@ def interactive(client):
                 do_links(client, slug or None)
             elif choice == "10":
                 do_seo_all(client)
+            elif choice == "11":
+                do_seo_all(client, report_path="")
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-10.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-11.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -336,6 +352,9 @@ def main(argv=None):
     parser.add_argument("--article", metavar="SLUG", help="With --seo: also check this one article slug in detail.")
     parser.add_argument("--articles", metavar="SLUGS", help="With --seo: check several article slugs at once, comma-separated (title, canonical, meta description, OG tags).")
     parser.add_argument("--all", action="store_true", help="With --seo: check EVERY article in the sitemap (full SEO audit).")
+    parser.add_argument("--report", metavar="FILE", nargs="?", const="", default=None,
+                        help="With --seo --all or --seo --articles: also save the results as a Markdown report. "
+                             "Give a file name, or leave it off for zavia-seo-report-<today>.md.")
     args = parser.parse_args(argv)
 
     client = ZaviaClient()
@@ -348,15 +367,17 @@ def main(argv=None):
             return 0
         if args.seo:
             if args.all:
-                report = do_seo_all(client)
+                report = do_seo_all(client, report_path=args.report)
                 return 0 if report["ok"] else 1
             if args.articles:
                 slugs = [s.strip() for s in args.articles.split(",") if s.strip()]
                 if not slugs:
                     print("Error: --articles needs at least one slug.", file=sys.stderr)
                     return 1
-                report = do_bulk_seo(client, slugs)
+                report = do_bulk_seo(client, slugs, report_path=args.report)
                 return 0 if report["ok"] else 1
+            if args.report is not None:
+                print("Note: --report only saves a file with --seo --all or --seo --articles.", file=sys.stderr)
             report = check_sitemap(client)
             print(report["summary"])
             if report["duplicate_slugs"]:

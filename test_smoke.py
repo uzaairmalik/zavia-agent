@@ -12,10 +12,12 @@ Exits 0 when every check passes, 1 otherwise.
 """
 
 import sys
+import tempfile
 
 sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 
 from zavia_agent.client import ZaviaClient, ZaviaError
+from zavia_agent.report import write_seo_report
 from zavia_agent.seo import check_sitemap_seo
 
 
@@ -49,6 +51,31 @@ def main():
     except ZaviaError as exc:
         ok, detail = False, str(exc)
     results.append(("Full SEO audit runs (sample of 3 articles)", ok, detail))
+
+    # 4. SEO report export (offline — formats a sample report, no network)
+    try:
+        sample = {
+            "results": [
+                {"slug": "good-article", "url": "https://zaviamagazine.dev/article/good-article",
+                 "status": 200, "title": "Good Article", "canonical": "https://zaviamagazine.dev/article/good-article",
+                 "description": "A fine description.", "warnings": [], "ok": True, "summary": "OK."},
+                {"slug": "plain-article", "url": "https://zaviamagazine.dev/article/plain-article",
+                 "status": 200, "title": "Plain Article", "canonical": "https://zaviamagazine.dev/article/plain-article",
+                 "description": "", "warnings": ["no meta description (Google will write its own snippet)"],
+                 "ok": True, "summary": "OK."},
+            ],
+            "checked": 2, "failed": 0, "warned": 1, "ok": True,
+            "summary": "Checked 2 article(s); 1 with warnings: plain-article.",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_seo_report(sample, tmp + "/report.md")
+            text = open(path, encoding="utf-8").read()
+            ok = ("good-article" in text and "plain-article" in text
+                  and "no meta description" in text and "## Warnings (1)" in text)
+            detail = f"wrote {len(text)} bytes to {path}"
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("SEO report export writes a Markdown file", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)
