@@ -4,6 +4,8 @@ Checks the LIVE site with plain public requests only:
   1. Homepage returns 200 and shows article cards.
   2. Sitemap is reachable and lists URLs.
   3. Full SEO audit runs (sample of 3 articles) and returns counts.
+  4. SEO report export writes a Markdown file (offline).
+  5. Dashboard module imports (a refactor once broke this silently).
 
 Run it:
     python test_smoke.py
@@ -76,6 +78,14 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("SEO report export writes a Markdown file", ok, detail))
+
+    # 5. Dashboard imports (the Day 5 refactor broke this silently — never again)
+    try:
+        import zavia_agent.web  # noqa: F401 — the import itself is the check
+        ok, detail = True, "web module imports cleanly"
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Dashboard module imports", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

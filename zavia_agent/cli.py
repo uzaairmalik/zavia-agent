@@ -10,6 +10,7 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --seo --all
     python -m zavia_agent.cli --seo --all --report        (save the audit as a Markdown file)
     python -m zavia_agent.cli --seo --articles a,b --report my-report.md
+    python -m zavia_agent.cli --seo-report   (full audit + dated report, compared with the last run)
     python -m zavia_agent.cli --links my-article-slug
     python -m zavia_agent.cli --links   (scan the homepage's links)
     python -m zavia_agent.cli --list
@@ -28,7 +29,8 @@ import sys
 
 from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
-from .report import default_report_path, write_seo_report
+from .report import (compare_reports, default_report_path, load_previous_state,
+                     run_audit, write_report, write_seo_report)
 from .seo import check_article, check_articles, check_links, check_sitemap, check_sitemap_seo, find_junk_articles
 
 
@@ -257,6 +259,39 @@ def do_junk(client):
         print("After deleting, they 404 and drop out — that is expected, not a problem.")
 
 
+def do_seo_report(client):
+    """Full SEO audit + dated report (Lesson 14 pattern).
+
+    Runs the audit, compares with the previous run (if any), writes a
+    dated Markdown + HTML report under reports/, and saves the state
+    for the next comparison. Non-interactive — safe to run from cron.
+    Returns the audit dict.
+    """
+    print("\nRunning the full SEO audit (sitemap + every article + junk check)...")
+    print("This takes a minute or two — one request per article.")
+    previous = load_previous_state()
+    audit = run_audit(client)
+    comparison = compare_reports(previous, audit)
+    paths = write_report(audit, comparison)
+    counts = audit["counts"]
+    print("\n" + audit["checks"]["sitemap"])
+    print(audit["checks"]["articles"])
+    print(audit["checks"]["junk"])
+    print(f"\nIssues: {counts['total_issues']} total "
+          f"({counts['fail_issues']} FAIL, {counts['warn_issues']} warnings).")
+    if comparison["first_run"]:
+        print("First audit run — no previous report to compare with yet.")
+    else:
+        print(f"Since the last report ({comparison['previous_date']}): "
+              f"{len(comparison['improved'])} fixed, "
+              f"{len(comparison['worse'])} new failures, "
+              f"{len(comparison['new'])} new issues.")
+    print("\nReport written:")
+    print("  " + paths["md"])
+    print("  " + paths["html"])
+    return audit
+
+
 # ---------------------------------------------------------------- menu
 MENU = """
 ================ ZAVIA AGENT ================
@@ -271,6 +306,7 @@ MENU = """
   9  Broken-link scan (one article's internal links)
  10  Full SEO audit (every article in the sitemap)
  11  Full SEO audit + save report to a file
+ 12  SEO audit report (full audit + dated report, compared with last run)
   0  Exit
 =============================================
 """
@@ -324,8 +360,10 @@ def interactive(client):
                 do_seo_all(client)
             elif choice == "11":
                 do_seo_all(client, report_path="")
+            elif choice == "12":
+                do_seo_report(client)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-11.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-12.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -355,6 +393,8 @@ def main(argv=None):
     parser.add_argument("--report", metavar="FILE", nargs="?", const="", default=None,
                         help="With --seo --all or --seo --articles: also save the results as a Markdown report. "
                              "Give a file name, or leave it off for zavia-seo-report-<today>.md.")
+    parser.add_argument("--seo-report", action="store_true",
+                        help="Full SEO audit + dated report under reports/, compared with the previous run (Lesson 14 pattern), and exit.")
     args = parser.parse_args(argv)
 
     client = ZaviaClient()
@@ -365,6 +405,9 @@ def main(argv=None):
         if args.junk:
             do_junk(client)
             return 0
+        if args.seo_report:
+            audit = do_seo_report(client)
+            return 0 if audit["ok"] else 1
         if args.seo:
             if args.all:
                 report = do_seo_all(client, report_path=args.report)
