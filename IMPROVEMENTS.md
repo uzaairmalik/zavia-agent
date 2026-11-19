@@ -2,6 +2,7 @@
 
 One line per daily improvement (date + what changed + commit). Newest first.
 
+- 2026-11-20 — Day 6: restore the SEO audit report + dashboard (broken by the Day 5 refactor) — report.py had been replaced by the single-file exporter, so web.py could not import (dashboard dead) and test_report.py failed on import; merged the Day 3 audit/compare/render functions back alongside the Day 5 exporter, restored `--seo-report` + menu 12, and added a dashboard-import check to the smoke test (now 5 checks). Live re-audit after the fix: 188 URLs, 71 articles, 0 issues. Commit c62c8b8d.
 - 2026-11-19 — Day 5: save SEO reports to a file (menu 11, `--seo --all/--articles --report`) — full audit or bulk check written as a dated Markdown file (summary, failed, warnings, clean list); default name `zavia-seo-report-<today>.md`. Commit 4cc6bf22.
 - 2026-11-18 — Day 4: full sitemap-wide SEO audit (menu 10, `--seo --all`) — checks every article in the sitemap for title, canonical, meta description and OG tags, no slug list to type; only problem articles listed one by one; exit 1 on failure. Commit e59f1cdd.
 - 2026-11-17 — Day 3: broken internal-link scan (menu 9, `--links [slug]`) — scans one article's (or the homepage's) internal page links and reports any non-200; external links, images/scripts and /api/ routes skipped; exit 1 when a link is broken. Commit 4c8171e2.
