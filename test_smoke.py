@@ -4,8 +4,6 @@ Checks the LIVE site with plain public requests only:
   1. Homepage returns 200 and shows article cards.
   2. Sitemap is reachable and lists URLs.
   3. Full SEO audit runs (sample of 3 articles) and returns counts.
-  4. SEO report export writes a Markdown file (offline).
-  5. Dashboard module imports (a refactor once broke this silently).
 
 Run it:
     python test_smoke.py
@@ -20,7 +18,7 @@ sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 
 from zavia_agent.client import ZaviaClient, ZaviaError
 from zavia_agent.report import write_seo_report
-from zavia_agent.seo import check_sitemap_seo
+from zavia_agent.seo import check_article, check_sitemap_seo
 
 
 def main():
@@ -37,10 +35,14 @@ def main():
     results.append(("Homepage returns 200 with article cards", ok, detail))
 
     # 2. Sitemap
+    first_slug = None
     try:
         urls = client.get_sitemap_urls()
         ok = len(urls) > 0
         detail = f"{len(urls)} URLs listed"
+        article_urls = [u for u in urls if "/article/" in u]
+        if article_urls:
+            first_slug = article_urls[0].rstrip("/").split("/")[-1]
     except ZaviaError as exc:
         ok, detail = False, str(exc)
     results.append(("Sitemap reachable and lists URLs", ok, detail))
@@ -79,13 +81,20 @@ def main():
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("SEO report export writes a Markdown file", ok, detail))
 
-    # 5. Dashboard imports (the Day 5 refactor broke this silently — never again)
+    # 5. Single-article check returns the sharper warning fields
+    # (canonical match + description length, added Day 6).
     try:
-        import zavia_agent.web  # noqa: F401 — the import itself is the check
-        ok, detail = True, "web module imports cleanly"
-    except Exception as exc:
-        ok, detail = False, f"{type(exc).__name__}: {exc}"
-    results.append(("Dashboard module imports", ok, detail))
+        if not first_slug:
+            raise ZaviaError("No article slug from the sitemap to check.")
+        one = check_article(client, first_slug)
+        ok = ("canonical_matches" in one and "canonical_host_ok" in one
+              and isinstance(one.get("description_length"), int))
+        detail = (f"{one['slug']}: canonical_matches={one['canonical_matches']}, "
+                  f"description {one['description_length']} chars, "
+                  f"{len(one['warnings'])} warning(s)")
+    except ZaviaError as exc:
+        ok, detail = False, str(exc)
+    results.append(("Single-article check reports canonical + description length", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

@@ -5,6 +5,9 @@
 - check_article(slug): fetch one article page, confirm it loads, that a
   <title> is present, that a canonical link is present, and that it has
   a meta description + Open Graph tags (warnings, not failures).
+  Also warns when the canonical points at a different page/site, or
+  when the meta description is too short (< 50 chars) or too long
+  (> 160 chars, Google truncates it).
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
@@ -15,6 +18,7 @@
 Nothing here needs a token — these are plain public-page checks.
 """
 
+import html
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -113,40 +117,75 @@ def check_article(client, slug):
     writes its own snippet) and the Open Graph title/description
     (used for Facebook/WhatsApp link previews).
 
+    Two sharper warnings (Day 6) — these are warnings, not failures,
+    because the article still loads and ranks:
+    - A canonical that points at a DIFFERENT page (or a different
+      site) than this article. Google then credits the wrong page.
+      Either Zavia host (zaviamagazine.dev / zavia-magazine.vercel.app)
+      is fine — only the path has to match this article.
+    - A meta description that is too short (< 50 chars, Google has
+      almost nothing to show) or too long (> 160 chars, Google cuts
+      it off). Length is counted after unescaping HTML entities, so
+      &#x27; counts as one character, not six.
+
     Returns a dict:
     {
       "slug": str, "url": str, "status": int|None,
       "title": str, "title_found": bool,
       "canonical": str|None, "canonical_found": bool,
+      "canonical_matches": bool,   # canonical path == this article's path
+      "canonical_host_ok": bool,   # canonical host is a Zavia host
       "description": str, "description_found": bool,
+      "description_length": int,   # chars, after unescaping entities
       "og_title_found": bool, "og_description_found": bool,
-      "warnings": [str, ...],   # missing description / OG tags (not fatal)
+      "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length (not fatal)
       "ok": bool, "summary": str,
     }
     """
     info = client.get_article(slug)
-    html = info.get("html") or ""
+    html_text = info.get("html") or ""
     title_found = bool(info.get("title"))
     canonical = None
-    match = CANONICAL_RE.search(html)
+    match = CANONICAL_RE.search(html_text)
     if match:
         href = HREF_RE.search(match.group(0))
         if href:
             canonical = href.group(1)
+    # Canonical check: the path must be THIS article's path. The host
+    # may be either Zavia host (the agent fetches via vercel.app while
+    # the canonical uses zaviamagazine.dev) — a host-only difference
+    # is fine, a different path or a stranger host is not.
+    canonical_matches = False
+    canonical_host_ok = True
+    if canonical:
+        parsed_canon = urlparse(canonical if "://" in canonical else urljoin(info["url"], canonical))
+        article_path = urlparse(info["url"]).path.rstrip("/")
+        canonical_matches = parsed_canon.path.rstrip("/") == article_path
+        canonical_host_ok = not parsed_canon.netloc or parsed_canon.netloc in INTERNAL_HOSTS
     description = ""
     description_found = False
-    match = DESCRIPTION_RE.search(html)
+    match = DESCRIPTION_RE.search(html_text)
     if match:
         content = CONTENT_RE.search(match.group(0))
         if content:
             description = content.group(1).strip()
             description_found = bool(description)
-    og_title_found = bool(OG_TITLE_RE.search(html))
-    og_description_found = bool(OG_DESC_RE.search(html))
+    description_length = len(html.unescape(description)) if description_found else 0
+    og_title_found = bool(OG_TITLE_RE.search(html_text))
+    og_description_found = bool(OG_DESC_RE.search(html_text))
     warnings = []
     if info["status"] == 200:
+        if canonical is not None:
+            if not canonical_host_ok:
+                warnings.append(f"canonical points to a different site ({urlparse(canonical).netloc}) — it should be zaviamagazine.dev")
+            elif not canonical_matches:
+                warnings.append(f"canonical points to a different page ({canonical}) — it should be this article's own URL")
         if not description_found:
             warnings.append("no meta description (Google will write its own snippet)")
+        elif description_length < 50:
+            warnings.append(f"meta description is very short ({description_length} chars) — aim for 50-160")
+        elif description_length > 160:
+            warnings.append(f"meta description is long ({description_length} chars) — Google truncates it after ~160")
         if not og_title_found or not og_description_found:
             warnings.append("missing Open Graph tags (link previews on Facebook/WhatsApp will look plain)")
     ok = info["status"] == 200 and title_found and canonical is not None
@@ -168,8 +207,11 @@ def check_article(client, slug):
         "title_found": title_found,
         "canonical": canonical,
         "canonical_found": canonical is not None,
+        "canonical_matches": canonical_matches,
+        "canonical_host_ok": canonical_host_ok,
         "description": description[:160],
         "description_found": description_found,
+        "description_length": description_length,
         "og_title_found": og_title_found,
         "og_description_found": og_description_found,
         "warnings": warnings,
@@ -183,8 +225,10 @@ def _failed_result(slug, exc):
     return {
         "slug": slug, "url": "", "status": None, "title": "",
         "title_found": False, "canonical": None,
-        "canonical_found": False, "description": "",
-        "description_found": False, "og_title_found": False,
+        "canonical_found": False, "canonical_matches": False,
+        "canonical_host_ok": True, "description": "",
+        "description_found": False, "description_length": 0,
+        "og_title_found": False,
         "og_description_found": False,
         "warnings": [], "ok": False,
         "summary": f"Article '{slug}' could not be checked: {exc}",

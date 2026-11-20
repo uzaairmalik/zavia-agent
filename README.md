@@ -7,7 +7,7 @@ It does eight useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
-3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once
+3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once. It also warns when a canonical points at the wrong page (or a different site) and when a meta description is too short (< 50 chars) or too long (> 160 chars — Google cuts it off).
 4. **Full SEO audit** — the same title/canonical/description/OG check on *every* article in the sitemap, so nothing gets forgotten
 5. **Broken-link scan** — one article's (or the homepage's) internal links, so dead links get fixed before Google finds them
 6. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
@@ -62,7 +62,6 @@ python -m zavia_agent.cli
   9  Broken-link scan (one article's internal links)
  10  Full SEO audit (every article in the sitemap)
  11  Full SEO audit + save report to a file
- 12  SEO audit report (full audit + dated report, compared with last run)
   0  Exit
 =============================================
 ```
@@ -77,7 +76,6 @@ python -m zavia_agent.cli --seo --articles slug-one,slug-two,slug-three
 python -m zavia_agent.cli --seo --all   # full audit: every article in the sitemap
 python -m zavia_agent.cli --seo --all --report        # same audit, saved as zavia-seo-report-<today>.md
 python -m zavia_agent.cli --seo --articles slug-one,slug-two --report my-report.md
-python -m zavia_agent.cli --seo-report   # full audit + dated report under reports/, compared with the last run
 python -m zavia_agent.cli --links my-article-slug
 python -m zavia_agent.cli --links   # scan the homepage's links
 python -m zavia_agent.cli --junk
@@ -101,7 +99,11 @@ description, and Open Graph title/description (for Facebook/WhatsApp
 link previews). A missing description or OG tag is a **warning**, not a
 failure — the article still loads, it just looks worse in search
 results and link previews. A missing title, canonical, or a 404 is a
-failure (exit code 1).
+failure (exit code 1). Two more warnings: a canonical that points at a
+*different* page than the article (Google then credits the wrong page —
+either Zavia host is fine, only the path has to match), and a meta
+description shorter than 50 chars or longer than 160 chars (Google
+truncates it after ~160).
 
 ### Full SEO audit (every article in the sitemap)
 
@@ -138,35 +140,6 @@ problem, every article with a warning, and the clean ones as a short
 list — so you can keep one report per day and compare them over time.
 The report file is yours to keep; it is not part of the repo, and
 nothing is uploaded anywhere.
-
-### SEO audit report (full audit, saved + compared with the last run)
-
-```bash
-python -m zavia_agent.cli --seo-report
-```
-
-One run audits the whole live site (sitemap reachability + URL count,
-duplicate slugs, a sample of URLs for broken links, **every** article
-for title/canonical/meta-description/OG tags, and the junk-article
-finder), then writes a dated report — Markdown + HTML — under
-`reports/` (e.g. `seo-report-2026-11-20-0005.md`) and stores the
-result in `state/last-audit.json` (gitignored) for the next
-comparison. The report shows what was checked, every issue found
-(with slugs/URLs), and — from the second run on — what improved
-(fixed), what got worse (new failures), what is new, and how the
-counts moved. The first run has no previous report, and says so
-plainly. Exit code is 1 when a FAIL issue is found, 0 otherwise.
-The dashboard shows the latest report on its home page and lists all
-of them at `/reports`. This is Hisham Sarwar's Lesson 14 pattern
-(weekly re-audit + progress report).
-
-Suggested schedule (run the same command each time; every run audits
-fresh and compares with the previous one):
-
-```cron
-# Thursday 11:00 — the weekly re-audit
-0 11 * * 4  cd /path/to/zavia-agent && .venv/bin/python -m zavia_agent.cli --seo-report
-```
 
 ### Broken-link scan (one article's internal links)
 
