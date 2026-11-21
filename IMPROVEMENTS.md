@@ -2,6 +2,7 @@
 
 One line per daily improvement (date + what changed + commit). Newest first.
 
+- 2026-11-21 — Day 7: duplicate title / meta-description detection — bulk check, full audit and --seo-report now flag titles or descriptions shared by 2+ articles (case/spacing-insensitive, full-text comparison; warnings, not failures; tracked as issues in the audit report so a fix shows as "improved" next run). Live audit of all 74 articles: 0 duplicate titles, 0 duplicate descriptions (clean); long descriptions now 16 (was 15 on Day 6). Commit 235240f3.
 - 2026-11-21 — Fix: restored the SEO audit report (--seo-report, menu 12, dashboard reports) that the Day 6 refactor accidentally removed from report.py while cli.py/web.py still used it (both failed to import); the Day 6 sharper warnings in seo.py are kept, and the smoke test re-gained the CLI + dashboard import checks.
 - 2026-11-20 — Day 6: sharper SEO warnings — canonical pointing at a different page/site, and meta description too short (<50 chars) or too long (>160, Google truncates); live audit found 15 articles with long descriptions, 0 canonical mismatches. Commit a7c1ac4c.
 - 2026-11-19 — Day 5: save SEO reports to a file (menu 11, `--seo --all/--articles --report`) — full audit or bulk check written as a dated Markdown file (summary, failed, warnings, clean list); default name `zavia-seo-report-<today>.md`. Commit 4cc6bf22.
