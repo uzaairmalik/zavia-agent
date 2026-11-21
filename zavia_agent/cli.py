@@ -162,6 +162,25 @@ def _save_report(report, report_path, client):
     print(f"\nReport saved to: {path}")
 
 
+def _print_duplicates(report):
+    """Print any duplicate titles / descriptions found in a bulk check
+    or full audit — one line per shared text, with the slugs sharing it."""
+    titles = report.get("duplicate_titles") or []
+    descriptions = report.get("duplicate_descriptions") or []
+    if not titles and not descriptions:
+        return
+    print("\nDuplicates (Google shows the same title/snippet for both — give each article its own):")
+    for group in titles:
+        print(f"  - Same title on: {', '.join(group['slugs'])}")
+        print(f"    \"{group['value']}\"")
+    for group in descriptions:
+        shown = group["value"]
+        if len(shown) > 160:
+            shown = shown[:160] + "..."
+        print(f"  - Same meta description on: {', '.join(group['slugs'])}")
+        print(f"    \"{shown}\"")
+
+
 def do_bulk_seo(client, slugs, report_path=None):
     """Check several article slugs at once; print one line per article.
 
@@ -179,6 +198,7 @@ def do_bulk_seo(client, slugs, report_path=None):
             line += " — " + result["summary"]
         print(line)
     print("\n" + report["summary"])
+    _print_duplicates(report)
     if report_path is not None:
         _save_report(report, report_path, client)
     return report
@@ -216,6 +236,7 @@ def do_seo_all(client, report_path=None):
             if result["ok"] and result["warnings"]:
                 print(f"  - {result['slug']} — " + "; ".join(result["warnings"]))
     print("\n" + report["summary"])
+    _print_duplicates(report)
     if report_path is not None:
         _save_report(report, report_path, client)
     return report

@@ -58,6 +58,8 @@ def _counts(**overrides):
         "articles_warned": 0,
         "broken_links": 0,
         "duplicate_slugs": 0,
+        "duplicate_titles": 0,
+        "duplicate_descriptions": 0,
         "junk_articles": 0,
         "total_issues": 0,
         "fail_issues": 0,
@@ -125,15 +127,18 @@ def test_improved_is_fixed_issues():
 
 
 def test_count_deltas_and_directions():
-    previous = _audit([], _counts(total_issues=5, fail_issues=3, warn_issues=2, broken_links=1))
+    previous = _audit([], _counts(total_issues=5, fail_issues=3, warn_issues=2, broken_links=1,
+                                  duplicate_titles=1))
     current = _audit([], _counts(total_issues=4, fail_issues=3, warn_issues=1, broken_links=2,
-                                 total_urls=182))
+                                 total_urls=182, duplicate_titles=0))
     result = compare_reports(previous, current)
     counts = result["counts"]
     assert counts["total_issues"] == {"previous": 5, "current": 4, "delta": -1, "direction": "better"}
     assert counts["fail_issues"]["direction"] == "same"
     assert counts["warn_issues"]["direction"] == "better"
     assert counts["broken_links"]["direction"] == "worse"
+    # Duplicate titles are lower-is-better: fixing one is an improvement.
+    assert counts["duplicate_titles"] == {"previous": 1, "current": 0, "delta": -1, "direction": "better"}
     # URL totals are info only — a change is neither better nor worse.
     assert counts["total_urls"]["direction"] == "info"
     assert counts["total_urls"]["delta"] == 2

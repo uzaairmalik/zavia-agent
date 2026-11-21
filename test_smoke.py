@@ -18,7 +18,7 @@ sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 
 from zavia_agent.client import ZaviaClient, ZaviaError
 from zavia_agent.report import write_seo_report
-from zavia_agent.seo import check_article, check_sitemap_seo
+from zavia_agent.seo import check_article, check_sitemap_seo, find_duplicate_meta
 
 
 def main():
@@ -50,8 +50,12 @@ def main():
     # 3. Full SEO audit (sample of 3 — the real audit checks all of them)
     try:
         report = check_sitemap_seo(client, limit=3)
-        ok = report["checked"] == 3 and "failed" in report and "warned" in report
-        detail = f"{report['checked']} articles checked, {report['failed']} failed, {report['warned']} with warnings"
+        ok = (report["checked"] == 3 and "failed" in report and "warned" in report
+              and "duplicate_titles" in report and "duplicate_descriptions" in report)
+        detail = (f"{report['checked']} articles checked, {report['failed']} failed, "
+                  f"{report['warned']} with warnings, "
+                  f"{len(report['duplicate_titles'])} duplicate title(s), "
+                  f"{len(report['duplicate_descriptions'])} duplicate description(s)")
     except ZaviaError as exc:
         ok, detail = False, str(exc)
     results.append(("Full SEO audit runs (sample of 3 articles)", ok, detail))
@@ -106,6 +110,32 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("CLI + dashboard modules import", ok, detail))
+
+    # 7. Duplicate title / description detection (offline — synthetic
+    # results, no network). Same title in different case/spacing counts
+    # as one duplicate; a missing description is not a duplicate; a
+    # unique article is not flagged.
+    try:
+        fake = [
+            {"slug": "a-one", "title": "How to Learn Python", "description": "Learn Python fast.",
+             "description_full": "Learn Python fast with this simple guide for students."},
+            {"slug": "a-two", "title": "how  to learn  python", "description": "Learn Python fast.",
+             "description_full": "learn python fast with this simple guide for students."},
+            {"slug": "a-three", "title": "Something Else", "description": "",
+             "description_full": ""},
+            {"slug": "a-four", "title": "Something Else Entirely", "description": "A different description.",
+             "description_full": "A different description, unique to this article."},
+        ]
+        dups = find_duplicate_meta(fake)
+        ok = (len(dups["duplicate_titles"]) == 1
+              and dups["duplicate_titles"][0]["slugs"] == ["a-one", "a-two"]
+              and len(dups["duplicate_descriptions"]) == 1
+              and dups["duplicate_descriptions"][0]["slugs"] == ["a-one", "a-two"])
+        detail = (f"{len(dups['duplicate_titles'])} duplicate title group(s), "
+                  f"{len(dups['duplicate_descriptions'])} duplicate description group(s)")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Duplicate titles/descriptions detected", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

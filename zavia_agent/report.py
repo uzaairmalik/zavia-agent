@@ -53,6 +53,8 @@ LOWER_IS_BETTER = (
     "warn_issues",
     "broken_links",
     "duplicate_slugs",
+    "duplicate_titles",
+    "duplicate_descriptions",
     "junk_articles",
     "articles_failed",
     "articles_warned",
@@ -88,7 +90,8 @@ def run_audit(client=None, link_sample=10):
       "date": str (YYYY-MM-DD, UTC),
       "counts": {total_urls, article_urls, articles_checked,
                  articles_failed, articles_warned, broken_links,
-                 duplicate_slugs, junk_articles,
+                 duplicate_slugs, duplicate_titles,
+                 duplicate_descriptions, junk_articles,
                  total_issues, fail_issues, warn_issues},
       "issues": [issue dict, ...],   # fails first, then warnings
       "checks": {"sitemap": str, "articles": str, "junk": str},
@@ -149,6 +152,27 @@ def run_audit(client=None, link_sample=10):
             f"junk-article:{item['slug']}", "warn", "junk-article", item["slug"],
             f"Test/junk article still live: {item['url']} ({item['marker']}). Delete it in the admin panel.",
         ))
+    # Duplicate titles / descriptions (Day 7): one WARN issue per shared
+    # text, so the next run can show it as fixed once the articles get
+    # their own title/description. The key is the normalised text, so
+    # the same duplicate next week has the same key.
+    for group in articles.get("duplicate_titles") or []:
+        slugs = ", ".join(group["slugs"])
+        issues.append(_issue(
+            f"duplicate-title:{group['key']}", "warn", "duplicate-title", slugs,
+            f"Same title on {len(group['slugs'])} articles ({slugs}): \"{group['value']}\" — "
+            "Google shows the same title for both; give each article its own title.",
+        ))
+    for group in articles.get("duplicate_descriptions") or []:
+        slugs = ", ".join(group["slugs"])
+        shown = group["value"]
+        if len(shown) > 120:
+            shown = shown[:120] + "..."
+        issues.append(_issue(
+            f"duplicate-description:{group['key']}", "warn", "duplicate-description", slugs,
+            f"Same meta description on {len(group['slugs'])} articles ({slugs}): \"{shown}\" — "
+            "Google shows the same snippet for both; write a unique description for each.",
+        ))
 
     issues.sort(key=lambda i: (0 if i["severity"] == "fail" else 1, i["key"]))
     fail_count = sum(1 for i in issues if i["severity"] == "fail")
@@ -164,6 +188,8 @@ def run_audit(client=None, link_sample=10):
             "articles_warned": articles["warned"],
             "broken_links": len(sitemap["broken"]),
             "duplicate_slugs": len(sitemap["duplicate_slugs"]),
+            "duplicate_titles": len(articles.get("duplicate_titles") or []),
+            "duplicate_descriptions": len(articles.get("duplicate_descriptions") or []),
             "junk_articles": len(junk["junk"]),
             "total_issues": len(issues),
             "fail_issues": fail_count,
@@ -296,6 +322,8 @@ def _count_rows(audit):
         ("Articles with warnings (missing description or OG tags)", counts["articles_warned"]),
         ("Broken links in the sitemap sample", counts["broken_links"]),
         ("Duplicate slugs in the sitemap", counts["duplicate_slugs"]),
+        ("Duplicate titles shared by 2+ articles", counts["duplicate_titles"]),
+        ("Duplicate meta descriptions shared by 2+ articles", counts["duplicate_descriptions"]),
         ("Junk / test articles still live", counts["junk_articles"]),
         ("Total issues", counts["total_issues"]),
         ("— of which FAIL (must fix)", counts["fail_issues"]),
@@ -617,6 +645,23 @@ def render_seo_report(report, site="https://zaviamagazine.dev"):
     failed = [r for r in results if not r["ok"]]
     warned = [r for r in results if r["ok"] and r["warnings"]]
     clean = [r for r in results if r["ok"] and not r["warnings"]]
+    duplicate_titles = report.get("duplicate_titles") or []
+    duplicate_descriptions = report.get("duplicate_descriptions") or []
+
+    if duplicate_titles or duplicate_descriptions:
+        lines.append("## Duplicates")
+        lines.append("")
+        lines.append("Same title or meta description on more than one article — "
+                     "Google shows the same title/snippet for both, so give each article its own.")
+        lines.append("")
+        for group in duplicate_titles:
+            lines.append(f"- Same title on {', '.join(group['slugs'])}: \"{group['value']}\"")
+        for group in duplicate_descriptions:
+            shown = group["value"]
+            if len(shown) > 160:
+                shown = shown[:160] + "..."
+            lines.append(f"- Same meta description on {', '.join(group['slugs'])}: \"{shown}\"")
+        lines.append("")
 
     if failed:
         lines.append(f"## Failed ({len(failed)})")

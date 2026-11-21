@@ -7,7 +7,7 @@ It does eight useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
-3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once. It also warns when a canonical points at the wrong page (or a different site) and when a meta description is too short (< 50 chars) or too long (> 160 chars — Google cuts it off).
+3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once. It also warns when a canonical points at the wrong page (or a different site), when a meta description is too short (< 50 chars) or too long (> 160 chars — Google cuts it off), and when two or more articles share the same title or meta description (Google shows the same title/snippet for both).
 4. **Full SEO audit** — the same title/canonical/description/OG check on *every* article in the sitemap, so nothing gets forgotten
 5. **Broken-link scan** — one article's (or the homepage's) internal links, so dead links get fixed before Google finds them
 6. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
@@ -105,7 +105,10 @@ failure (exit code 1). Two more warnings: a canonical that points at a
 *different* page than the article (Google then credits the wrong page —
 either Zavia host is fine, only the path has to match), and a meta
 description shorter than 50 chars or longer than 160 chars (Google
-truncates it after ~160).
+truncates it after ~160). The bulk check and the full audit also list
+duplicate titles and duplicate meta descriptions shared by two or more
+of the checked articles (a warning, not a failure — fix it by giving
+each article its own title and description).
 
 ### Full SEO audit (every article in the sitemap)
 
@@ -121,7 +124,14 @@ Same checks as the bulk check, but the slugs come from the sitemap —
 you type nothing. Run it once a week as a sweep: it catches the
 articles you forgot to check one by one. Only the articles with a
 problem are listed one by one; the clean ones just count towards the
-summary. Exit code is 1 when any article fails (missing title,
+summary. The audit also reports **duplicate titles and duplicate meta
+descriptions** — two or more articles sharing the same title or the
+same description (compared on the full text, case- and spacing-insensitive,
+so a near-identical copy counts too). That is a warning, not a failure:
+the articles still load, but Google shows the same title/snippet for
+both, so give each article its own. The `--seo-report` audit tracks
+these as issues too, so a fixed duplicate shows up as "improved" in
+the next report. Exit code is 1 when any article fails (missing title,
 canonical, or a 404), so you can run it in a script. It takes about a
 minute (one quick request per article).
 

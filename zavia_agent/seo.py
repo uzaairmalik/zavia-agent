@@ -11,6 +11,10 @@
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
+- find_duplicate_meta(results): titles / meta descriptions shared by
+  more than one article — Google shows the same title/snippet for
+  both, so each article needs its own. Used by the bulk check and the
+  full audit; costs no extra requests (it reuses the fetched pages).
 - check_links(slug=None): fetch one article page (or the homepage when
   no slug is given), find its internal links, and report any that
   return a non-200 status — broken internal links hurt SEO.
@@ -136,6 +140,7 @@ def check_article(client, slug):
       "canonical_matches": bool,   # canonical path == this article's path
       "canonical_host_ok": bool,   # canonical host is a Zavia host
       "description": str, "description_found": bool,
+      "description_full": str,   # full description, entities unescaped
       "description_length": int,   # chars, after unescaping entities
       "og_title_found": bool, "og_description_found": bool,
       "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length (not fatal)
@@ -210,6 +215,7 @@ def check_article(client, slug):
         "canonical_matches": canonical_matches,
         "canonical_host_ok": canonical_host_ok,
         "description": description[:160],
+        "description_full": html.unescape(description).strip() if description_found else "",
         "description_found": description_found,
         "description_length": description_length,
         "og_title_found": og_title_found,
@@ -220,6 +226,64 @@ def check_article(client, slug):
     }
 
 
+def _normalise_meta(value):
+    """One comparable form of a title / description: entities unescaped,
+    whitespace collapsed, lowercased. So 'Foo  Bar' and 'foo bar' count
+    as the same text, while genuinely different texts stay different."""
+    return " ".join(html.unescape(value or "").split()).lower()
+
+
+def find_duplicate_meta(results):
+    """Find titles / meta descriptions shared by more than one article.
+
+    Google treats a shared title or description as a sign of thin or
+    duplicate content: two articles get the same title/snippet in
+    search results, so neither stands out. Each article needs its own.
+
+    results: check_article() dicts (from check_articles or
+    check_sitemap_seo — no extra requests, the pages are already
+    fetched). Empty titles / descriptions are skipped — a missing
+    description is already warned about per article, it is not a
+    duplicate. Comparison is on the FULL description
+    (description_full), not the 160-char display cut, so two long
+    descriptions that only share their first 160 chars are not
+    flagged.
+
+    Returns a dict:
+    {
+      "duplicate_titles": [{"key": str, "value": str, "slugs": [str, ...]}, ...],
+      "duplicate_descriptions": [{"key": str, "value": str, "slugs": [str, ...]}, ...],
+    }
+    `key` is the normalised text (stable across runs — the audit
+    report uses it for its issue keys); `value` is the text as first
+    seen, for display; `slugs` lists every article sharing it.
+    """
+    titles = {}
+    descriptions = {}
+    for result in results:
+        slug = result.get("slug") or ""
+        if not slug:
+            continue
+        title_key = _normalise_meta(result.get("title") or "")
+        if title_key:
+            group = titles.setdefault(title_key, {"key": title_key, "value": (result.get("title") or "").strip(), "slugs": []})
+            group["slugs"].append(slug)
+        desc_key = _normalise_meta(result.get("description_full") or result.get("description") or "")
+        if desc_key:
+            group = descriptions.setdefault(desc_key, {"key": desc_key, "value": (result.get("description_full") or result.get("description") or "").strip(), "slugs": []})
+            group["slugs"].append(slug)
+    # Most-shared first, then alphabetically — deterministic order.
+    dup_titles = sorted(
+        (g for g in titles.values() if len(g["slugs"]) > 1),
+        key=lambda g: (-len(g["slugs"]), g["key"]),
+    )
+    dup_descs = sorted(
+        (g for g in descriptions.values() if len(g["slugs"]) > 1),
+        key=lambda g: (-len(g["slugs"]), g["key"]),
+    )
+    return {"duplicate_titles": dup_titles, "duplicate_descriptions": dup_descs}
+
+
 def _failed_result(slug, exc):
     """A check_article-shaped dict for an article that could not be checked."""
     return {
@@ -227,6 +291,7 @@ def _failed_result(slug, exc):
         "title_found": False, "canonical": None,
         "canonical_found": False, "canonical_matches": False,
         "canonical_host_ok": True, "description": "",
+        "description_full": "",
         "description_found": False, "description_length": 0,
         "og_title_found": False,
         "og_description_found": False,
@@ -243,12 +308,16 @@ def check_articles(client, slugs):
     {
       "results": [check_article(...) dict, ...],
       "checked": int, "failed": int, "warned": int,
+      "duplicate_titles": [{"key", "value", "slugs"}, ...],
+      "duplicate_descriptions": [{"key", "value", "slugs"}, ...],
       "ok": bool,   # True only when every article passed title+canonical
       "summary": str,
     }
     A missing meta description or OG tag is a warning, not a failure —
     the article still loads and ranks, it just looks worse in search
-    results and link previews.
+    results and link previews. Duplicate titles / descriptions are
+    reported as groups (see find_duplicate_meta) — they are warnings
+    too, and do not change `ok`.
     """
     results = []
     for slug in slugs:
@@ -261,19 +330,26 @@ def check_articles(client, slugs):
             results.append(_failed_result(slug, exc))
     failed = [r for r in results if not r["ok"]]
     warned = [r for r in results if r["ok"] and r["warnings"]]
+    duplicates = find_duplicate_meta(results)
     ok = not failed
     parts = [f"Checked {len(results)} article(s)"]
     if failed:
         parts.append(f"{len(failed)} failed: " + ", ".join(r["slug"] for r in failed))
     if warned:
         parts.append(f"{len(warned)} with warnings: " + ", ".join(r["slug"] for r in warned))
-    if not failed and not warned:
+    if duplicates["duplicate_titles"]:
+        parts.append(f"{len(duplicates['duplicate_titles'])} duplicate title(s)")
+    if duplicates["duplicate_descriptions"]:
+        parts.append(f"{len(duplicates['duplicate_descriptions'])} duplicate meta description(s)")
+    if not failed and not warned and not duplicates["duplicate_titles"] and not duplicates["duplicate_descriptions"]:
         parts.append("all OK — titles, canonicals, meta descriptions and OG tags present")
     return {
         "results": results,
         "checked": len(results),
         "failed": len(failed),
         "warned": len(warned),
+        "duplicate_titles": duplicates["duplicate_titles"],
+        "duplicate_descriptions": duplicates["duplicate_descriptions"],
         "ok": ok,
         "summary": "; ".join(parts) + ".",
     }
@@ -296,6 +372,8 @@ def check_sitemap_seo(client=None, limit=150, progress=None):
       "results": [check_article(...) dict, ...],
       "checked": int, "failed": int, "warned": int,
       "failed_slugs": [slug, ...], "warned_slugs": [slug, ...],
+      "duplicate_titles": [{"key", "value", "slugs"}, ...],
+      "duplicate_descriptions": [{"key", "value", "slugs"}, ...],
       "ok": bool,   # True only when no article failed title/canonical
       "summary": str,
     }
@@ -321,13 +399,18 @@ def check_sitemap_seo(client=None, limit=150, progress=None):
             progress(i, len(slugs))
     failed = [r for r in results if not r["ok"]]
     warned = [r for r in results if r["ok"] and r["warnings"]]
+    duplicates = find_duplicate_meta(results)
     ok = not failed
     parts = [f"Checked {len(results)} article(s) from the sitemap"]
     if failed:
         parts.append(f"{len(failed)} failed: " + ", ".join(r["slug"] for r in failed))
     if warned:
         parts.append(f"{len(warned)} with warnings: " + ", ".join(r["slug"] for r in warned))
-    if not failed and not warned:
+    if duplicates["duplicate_titles"]:
+        parts.append(f"{len(duplicates['duplicate_titles'])} duplicate title(s)")
+    if duplicates["duplicate_descriptions"]:
+        parts.append(f"{len(duplicates['duplicate_descriptions'])} duplicate meta description(s)")
+    if not failed and not warned and not duplicates["duplicate_titles"] and not duplicates["duplicate_descriptions"]:
         parts.append("all OK — titles, canonicals, meta descriptions and OG tags present")
     return {
         "results": results,
@@ -336,6 +419,8 @@ def check_sitemap_seo(client=None, limit=150, progress=None):
         "warned": len(warned),
         "failed_slugs": [r["slug"] for r in failed],
         "warned_slugs": [r["slug"] for r in warned],
+        "duplicate_titles": duplicates["duplicate_titles"],
+        "duplicate_descriptions": duplicates["duplicate_descriptions"],
         "ok": ok,
         "summary": "; ".join(parts) + ".",
     }
