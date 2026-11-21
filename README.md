@@ -62,6 +62,7 @@ python -m zavia_agent.cli
   9  Broken-link scan (one article's internal links)
  10  Full SEO audit (every article in the sitemap)
  11  Full SEO audit + save report to a file
+ 12  SEO audit report (full audit + dated report, compared with last run)
   0  Exit
 =============================================
 ```
@@ -75,6 +76,7 @@ python -m zavia_agent.cli --seo --article my-article-slug
 python -m zavia_agent.cli --seo --articles slug-one,slug-two,slug-three
 python -m zavia_agent.cli --seo --all   # full audit: every article in the sitemap
 python -m zavia_agent.cli --seo --all --report        # same audit, saved as zavia-seo-report-<today>.md
+python -m zavia_agent.cli --seo-report   # full audit + dated report under reports/, compared with the last run
 python -m zavia_agent.cli --seo --articles slug-one,slug-two --report my-report.md
 python -m zavia_agent.cli --links my-article-slug
 python -m zavia_agent.cli --links   # scan the homepage's links
@@ -140,6 +142,35 @@ problem, every article with a warning, and the clean ones as a short
 list — so you can keep one report per day and compare them over time.
 The report file is yours to keep; it is not part of the repo, and
 nothing is uploaded anywhere.
+
+### SEO audit report (full audit, saved + compared with the last run)
+
+```bash
+python -m zavia_agent.cli --seo-report
+```
+
+One run audits the whole live site (sitemap reachability + URL count,
+duplicate slugs, a sample of URLs for broken links, **every** article
+for title/canonical/meta-description/OG tags, and the junk-article
+finder), then writes a dated report — Markdown + HTML — under
+`reports/` (e.g. `seo-report-2026-11-20-0005.md`) and stores the
+result in `state/last-audit.json` (gitignored) for the next
+comparison. The report shows what was checked, every issue found
+(with slugs/URLs), and — from the second run on — what improved
+(fixed), what got worse (new failures), what is new, and how the
+counts moved. The first run has no previous report, and says so
+plainly. Exit code is 1 when a FAIL issue is found, 0 otherwise.
+The dashboard shows the latest report on its home page and lists all
+of them at `/reports`. This is Hisham Sarwar's Lesson 14 pattern
+(weekly re-audit + progress report).
+
+Suggested schedule (run the same command each time; every run audits
+fresh and compares with the previous one):
+
+```cron
+# Thursday 11:00 — the weekly re-audit
+0 11 * * 4  cd /path/to/zavia-agent && .venv/bin/python -m zavia_agent.cli --seo-report
+```
 
 ### Broken-link scan (one article's internal links)
 

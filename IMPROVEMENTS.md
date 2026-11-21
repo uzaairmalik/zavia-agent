@@ -2,6 +2,7 @@
 
 One line per daily improvement (date + what changed + commit). Newest first.
 
+- 2026-11-21 — Fix: restored the SEO audit report (--seo-report, menu 12, dashboard reports) that the Day 6 refactor accidentally removed from report.py while cli.py/web.py still used it (both failed to import); the Day 6 sharper warnings in seo.py are kept, and the smoke test re-gained the CLI + dashboard import checks.
 - 2026-11-20 — Day 6: sharper SEO warnings — canonical pointing at a different page/site, and meta description too short (<50 chars) or too long (>160, Google truncates); live audit found 15 articles with long descriptions, 0 canonical mismatches. Commit a7c1ac4c.
 - 2026-11-19 — Day 5: save SEO reports to a file (menu 11, `--seo --all/--articles --report`) — full audit or bulk check written as a dated Markdown file (summary, failed, warnings, clean list); default name `zavia-seo-report-<today>.md`. Commit 4cc6bf22.
 - 2026-11-18 — Day 4: full sitemap-wide SEO audit (menu 10, `--seo --all`) — checks every article in the sitemap for title, canonical, meta description and OG tags, no slug list to type; only problem articles listed one by one; exit 1 on failure. Commit e59f1cdd.

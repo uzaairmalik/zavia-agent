@@ -96,6 +96,17 @@ def main():
         ok, detail = False, str(exc)
     results.append(("Single-article check reports canonical + description length", ok, detail))
 
+    # 6. Every module imports (the Day 6 refactor broke cli.py + web.py
+    # silently by gutting report.py, and had also deleted this guard —
+    # never again: the smoke test must import every module the agent ships).
+    try:
+        import zavia_agent.cli  # noqa: F401 — the import itself is the check
+        import zavia_agent.web  # noqa: F401 — the import itself is the check
+        ok, detail = True, "cli + web modules import cleanly"
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("CLI + dashboard modules import", ok, detail))
+
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)
     all_ok = True
