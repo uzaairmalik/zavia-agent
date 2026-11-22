@@ -8,8 +8,9 @@ Mon/Wed/Fri; this module is Zavia's version of it:
 
 - run_audit(): one audit run. It reuses the checks in seo.py (sitemap
   reachability + URL count, duplicate slugs, a sample of URLs for
-  broken links, per-article title/canonical/meta-description/OG checks,
-  plus the junk-article finder) and returns one structured result.
+  broken links, per-article title/canonical/meta-description/OG/H1/
+  word-count checks, plus the junk-article finder) and returns one
+  structured result.
 - compare_reports(previous, current): new vs fixed vs ongoing issues,
   plus per-count deltas labelled better/worse/same.
 - write_report(): saves a dated Markdown + HTML report under reports/
@@ -39,7 +40,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from .client import ZaviaClient
-from .seo import check_articles, check_sitemap, find_junk_articles
+from .seo import THIN_CONTENT_WORDS, check_articles, check_sitemap, find_junk_articles
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORTS_DIR = os.path.join(REPO_ROOT, "reports")
@@ -55,6 +56,8 @@ LOWER_IS_BETTER = (
     "duplicate_slugs",
     "duplicate_titles",
     "duplicate_descriptions",
+    "thin_articles",
+    "h1_issues",
     "junk_articles",
     "articles_failed",
     "articles_warned",
@@ -147,6 +150,24 @@ def run_audit(client=None, link_sample=10):
                 f"article:{slug}:missing-og", "warn", "missing-og", slug,
                 f"Article '{slug}' is missing Open Graph tags (link previews will look plain).",
             ))
+        # Content checks (Day 8): H1 count and thin content. Both are
+        # warnings — the article loads and ranks, it just ranks worse.
+        h1_count = result.get("h1_count")
+        if h1_count is not None and h1_count != 1:
+            detail = (
+                f"Article '{slug}' has no <h1> heading — Google uses the H1 to understand what the page is about."
+                if h1_count == 0 else
+                f"Article '{slug}' has {h1_count} <h1> headings — a page should have exactly one."
+            )
+            issues.append(_issue(
+                f"article:{slug}:h1", "warn", "h1", slug, detail,
+            ))
+        word_count = result.get("word_count")
+        if word_count is not None and word_count < THIN_CONTENT_WORDS:
+            issues.append(_issue(
+                f"article:{slug}:thin-content", "warn", "thin-content", slug,
+                f"Article '{slug}' is thin content — only {word_count} words in the article body (aim for {THIN_CONTENT_WORDS}+).",
+            ))
     for item in junk["junk"]:
         issues.append(_issue(
             f"junk-article:{item['slug']}", "warn", "junk-article", item["slug"],
@@ -190,6 +211,8 @@ def run_audit(client=None, link_sample=10):
             "duplicate_slugs": len(sitemap["duplicate_slugs"]),
             "duplicate_titles": len(articles.get("duplicate_titles") or []),
             "duplicate_descriptions": len(articles.get("duplicate_descriptions") or []),
+            "thin_articles": sum(1 for i in issues if i["kind"] == "thin-content"),
+            "h1_issues": sum(1 for i in issues if i["kind"] == "h1"),
             "junk_articles": len(junk["junk"]),
             "total_issues": len(issues),
             "fail_issues": fail_count,
@@ -324,6 +347,8 @@ def _count_rows(audit):
         ("Duplicate slugs in the sitemap", counts["duplicate_slugs"]),
         ("Duplicate titles shared by 2+ articles", counts["duplicate_titles"]),
         ("Duplicate meta descriptions shared by 2+ articles", counts["duplicate_descriptions"]),
+        ("Thin articles (under 300 words in the body)", counts["thin_articles"]),
+        ("Articles with a wrong H1 count (not exactly one)", counts["h1_issues"]),
         ("Junk / test articles still live", counts["junk_articles"]),
         ("Total issues", counts["total_issues"]),
         ("— of which FAIL (must fix)", counts["fail_issues"]),

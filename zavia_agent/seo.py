@@ -7,7 +7,10 @@
   a meta description + Open Graph tags (warnings, not failures).
   Also warns when the canonical points at a different page/site, or
   when the meta description is too short (< 50 chars) or too long
-  (> 160 chars, Google truncates it).
+  (> 160 chars, Google truncates it). It also checks the article's
+  own content: exactly one <h1> heading, and a word count of the
+  article body (under 300 words counts as thin content — Google may
+  treat it as low value). Both are warnings, not failures.
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
@@ -39,6 +42,18 @@ LINK_HREF_RE = re.compile(r'<a\s[^>]*href=["\']([^"\']+)["\']', re.IGNORECASE)
 
 CANONICAL_RE = re.compile(r'<link[^>]+rel=["\']canonical["\'][^>]*>', re.IGNORECASE)
 HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+# Article content checks (Day 8): one <h1> per page, and a real body of
+# words. The <article> tag holds the body; nav, footer and "related
+# articles" sit outside it, so counting words inside it measures the
+# article itself, not the page chrome.
+H1_RE = re.compile(r'<h1[\s>]', re.IGNORECASE)
+ARTICLE_RE = re.compile(r'<article\b[^>]*>(.*?)</article>', re.IGNORECASE | re.DOTALL)
+SCRIPT_RE = re.compile(r'<script.*?</script>', re.IGNORECASE | re.DOTALL)
+STYLE_RE = re.compile(r'<style.*?</style>', re.IGNORECASE | re.DOTALL)
+TAG_RE = re.compile(r'<[^>]+>')
+# Under this many words the article is "thin content" — Google may
+# treat a very short page as low value, so it ranks worse.
+THIN_CONTENT_WORDS = 300
 # Meta description + Open Graph tags (Google + social previews use these).
 DESCRIPTION_RE = re.compile(r'<meta[^>]+name=["\']description["\'][^>]*>', re.IGNORECASE)
 OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]*>', re.IGNORECASE)
@@ -50,6 +65,30 @@ def _slug_of(url):
     """Last path segment of a URL (the article slug for /article/<slug>)."""
     path = urlparse(url).path.strip("/")
     return path.split("/")[-1] if path else ""
+
+
+def _article_word_count(html_text):
+    """Word count of the article body, or None when it cannot be found.
+
+    Takes the text inside the page's <article> tag, strips scripts,
+    styles and all other tags, unescapes HTML entities, and counts the
+    words left. Returns None when the page has no <article> tag (some
+    pages render differently) — then no thin-content warning is given
+    rather than a wrong one.
+    """
+    match = ARTICLE_RE.search(html_text or "")
+    if not match:
+        return None
+    body = SCRIPT_RE.sub(" ", match.group(1))
+    body = STYLE_RE.sub(" ", body)
+    body = TAG_RE.sub(" ", body)
+    body = html.unescape(body)
+    return len([word for word in body.split() if word.strip()])
+
+
+def _h1_count(html_text):
+    """How many <h1> headings the page has (a page should have exactly one)."""
+    return len(H1_RE.findall(html_text or ""))
 
 
 def check_sitemap(client=None, sample=10, timeout=15):
@@ -132,6 +171,15 @@ def check_article(client, slug):
       it off). Length is counted after unescaping HTML entities, so
       &#x27; counts as one character, not six.
 
+    Two content warnings (Day 8) — also warnings, not failures:
+    - No <h1> heading, or more than one. Google uses the H1 to
+      understand what the page is about, and a page should have
+      exactly one.
+    - Thin content: fewer than 300 words in the article body (the
+      text inside the page's <article> tag). A very short page may
+      rank as low value. When the page has no <article> tag the word
+      count cannot be measured, so no thin-content warning is given.
+
     Returns a dict:
     {
       "slug": str, "url": str, "status": int|None,
@@ -143,7 +191,9 @@ def check_article(client, slug):
       "description_full": str,   # full description, entities unescaped
       "description_length": int,   # chars, after unescaping entities
       "og_title_found": bool, "og_description_found": bool,
-      "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length (not fatal)
+      "h1_count": int,   # <h1> headings found (should be exactly 1)
+      "word_count": int|None,   # words in the <article> body (None when no <article> tag)
+      "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length / H1 / thin content (not fatal)
       "ok": bool, "summary": str,
     }
     """
@@ -178,6 +228,8 @@ def check_article(client, slug):
     description_length = len(html.unescape(description)) if description_found else 0
     og_title_found = bool(OG_TITLE_RE.search(html_text))
     og_description_found = bool(OG_DESC_RE.search(html_text))
+    h1_count = _h1_count(html_text)
+    word_count = _article_word_count(html_text)
     warnings = []
     if info["status"] == 200:
         if canonical is not None:
@@ -193,6 +245,12 @@ def check_article(client, slug):
             warnings.append(f"meta description is long ({description_length} chars) — Google truncates it after ~160")
         if not og_title_found or not og_description_found:
             warnings.append("missing Open Graph tags (link previews on Facebook/WhatsApp will look plain)")
+        if h1_count == 0:
+            warnings.append("no <h1> heading — Google uses the H1 to understand what the page is about")
+        elif h1_count > 1:
+            warnings.append(f"{h1_count} <h1> headings — a page should have exactly one")
+        if word_count is not None and word_count < THIN_CONTENT_WORDS:
+            warnings.append(f"thin content — only {word_count} words in the article body (aim for 300+)")
     ok = info["status"] == 200 and title_found and canonical is not None
     if info["status"] == 404:
         summary = f"Article '{slug}' is a 404 (not found)."
@@ -220,6 +278,8 @@ def check_article(client, slug):
         "description_length": description_length,
         "og_title_found": og_title_found,
         "og_description_found": og_description_found,
+        "h1_count": h1_count,
+        "word_count": word_count,
         "warnings": warnings,
         "ok": ok,
         "summary": summary,
@@ -295,6 +355,8 @@ def _failed_result(slug, exc):
         "description_found": False, "description_length": 0,
         "og_title_found": False,
         "og_description_found": False,
+        "h1_count": 0,
+        "word_count": None,
         "warnings": [], "ok": False,
         "summary": f"Article '{slug}' could not be checked: {exc}",
     }
@@ -359,9 +421,9 @@ def check_sitemap_seo(client=None, limit=150, progress=None):
     """Check SEO tags on EVERY article in the sitemap.
 
     Same per-article checks as check_articles (title, canonical, meta
-    description, OG tags), but the slugs come from the sitemap itself —
-    no list to type. A weekly sweep: it catches the articles Uzair
-    forgot to check one by one.
+    description, OG tags, H1 count, article word count), but the slugs
+    come from the sitemap itself — no list to type. A weekly sweep: it
+    catches the articles Uzair forgot to check one by one.
 
     limit: max articles to check (the sitemap holds ~70 articles; the
     cap keeps a bad day quick). progress: optional callback called as

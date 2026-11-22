@@ -18,7 +18,8 @@ sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 
 from zavia_agent.client import ZaviaClient, ZaviaError
 from zavia_agent.report import write_seo_report
-from zavia_agent.seo import check_article, check_sitemap_seo, find_duplicate_meta
+from zavia_agent.seo import (_article_word_count, _h1_count, check_article,
+                             check_sitemap_seo, find_duplicate_meta)
 
 
 def main():
@@ -86,19 +87,23 @@ def main():
     results.append(("SEO report export writes a Markdown file", ok, detail))
 
     # 5. Single-article check returns the sharper warning fields
-    # (canonical match + description length, added Day 6).
+    # (canonical match + description length, added Day 6) and the
+    # content fields (H1 count + word count, added Day 8).
     try:
         if not first_slug:
             raise ZaviaError("No article slug from the sitemap to check.")
         one = check_article(client, first_slug)
         ok = ("canonical_matches" in one and "canonical_host_ok" in one
-              and isinstance(one.get("description_length"), int))
+              and isinstance(one.get("description_length"), int)
+              and one.get("h1_count") == 1
+              and isinstance(one.get("word_count"), int) and one["word_count"] > 300)
         detail = (f"{one['slug']}: canonical_matches={one['canonical_matches']}, "
                   f"description {one['description_length']} chars, "
+                  f"h1_count={one['h1_count']}, word_count={one['word_count']}, "
                   f"{len(one['warnings'])} warning(s)")
     except ZaviaError as exc:
         ok, detail = False, str(exc)
-    results.append(("Single-article check reports canonical + description length", ok, detail))
+    results.append(("Single-article check reports canonical + description length + H1/word count", ok, detail))
 
     # 6. Every module imports (the Day 6 refactor broke cli.py + web.py
     # silently by gutting report.py, and had also deleted this guard —
@@ -136,6 +141,53 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("Duplicate titles/descriptions detected", ok, detail))
+
+    # 8. H1 + word-count checks (offline — synthetic pages, no network).
+    # A short article with two H1s must warn about both; a long article
+    # with one H1 must warn about neither; a page with no <article>
+    # tag gives no word count and no thin-content warning.
+    try:
+        class _FakeClient:
+            def __init__(self, html_text):
+                self._html = html_text
+
+            def get_article(self, slug):
+                return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
+                        "status": 200, "title": "Fake Article", "html": self._html}
+
+        long_body = "word " * 350
+        long_page = ("<html><head><title>Fake Article</title>"
+                     '<link rel="canonical" href="https://zaviamagazine.dev/article/fake">'
+                     '<meta name="description" content="A fine description that is long enough to pass the fifty character minimum.">'
+                     '<meta property="og:title" content="Fake Article">'
+                     '<meta property="og:description" content="A fine description."></head>'
+                     "<body><h1>Fake Article</h1><article><p>" + long_body + "</p></article></body></html>")
+        short_body = "word " * 40
+        short_page = ("<html><head><title>Fake Article</title>"
+                      '<link rel="canonical" href="https://zaviamagazine.dev/article/fake">'
+                      '<meta name="description" content="A fine description that is long enough to pass the fifty character minimum.">'
+                      '<meta property="og:title" content="Fake Article">'
+                      '<meta property="og:description" content="A fine description."></head>'
+                      "<body><h1>Fake Article</h1><h1>Second Heading</h1><article><p>"
+                      + short_body + "</p></article></body></html>")
+        no_article_page = "<html><head><title>Fake</title></head><body><h1>Fake</h1><p>no article tag here</p></body></html>"
+        good = check_article(_FakeClient(long_page), "fake")
+        thin = check_article(_FakeClient(short_page), "fake")
+        no_tag = check_article(_FakeClient(no_article_page), "fake")
+        ok = (good["h1_count"] == 1 and good["word_count"] == 350 and not good["warnings"]
+              and thin["h1_count"] == 2 and thin["word_count"] == 40
+              and any("thin content" in w for w in thin["warnings"])
+              and any("2 <h1>" in w for w in thin["warnings"])
+              and no_tag["word_count"] is None
+              and not any("thin content" in w for w in no_tag["warnings"])
+              and _article_word_count("<article><p>one two three</p><script>var x = 1 2 3;</script></article>") == 3
+              and _h1_count("<h1>A</h1><H1>B</H1>") == 2)
+        detail = (f"good: h1={good['h1_count']}, words={good['word_count']}, warnings={len(good['warnings'])}; "
+                  f"thin: h1={thin['h1_count']}, words={thin['word_count']}, warnings={len(thin['warnings'])}; "
+                  f"no <article>: words={no_tag['word_count']}")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("H1 + thin-content checks (offline synthetic pages)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

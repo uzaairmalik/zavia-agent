@@ -7,7 +7,7 @@ It does eight useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
-3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once. It also warns when a canonical points at the wrong page (or a different site), when a meta description is too short (< 50 chars) or too long (> 160 chars — Google cuts it off), and when two or more articles share the same title or meta description (Google shows the same title/snippet for both).
+3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once. It also warns when a canonical points at the wrong page (or a different site), when a meta description is too short (< 50 chars) or too long (> 160 chars — Google cuts it off), when two or more articles share the same title or meta description (Google shows the same title/snippet for both), when a page has no `<h1>` heading or more than one, and when an article is thin content (under 300 words in the body).
 4. **Full SEO audit** — the same title/canonical/description/OG check on *every* article in the sitemap, so nothing gets forgotten
 5. **Broken-link scan** — one article's (or the homepage's) internal links, so dead links get fixed before Google finds them
 6. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
@@ -108,7 +108,11 @@ description shorter than 50 chars or longer than 160 chars (Google
 truncates it after ~160). The bulk check and the full audit also list
 duplicate titles and duplicate meta descriptions shared by two or more
 of the checked articles (a warning, not a failure — fix it by giving
-each article its own title and description).
+each article its own title and description). Two content warnings as
+well: a page with no `<h1>` heading or more than one (a page should
+have exactly one — Google uses it to understand what the page is
+about), and an article with under 300 words in its body ("thin
+content" — Google may treat a very short page as low value).
 
 ### Full SEO audit (every article in the sitemap)
 
@@ -161,8 +165,8 @@ python -m zavia_agent.cli --seo-report
 
 One run audits the whole live site (sitemap reachability + URL count,
 duplicate slugs, a sample of URLs for broken links, **every** article
-for title/canonical/meta-description/OG tags, and the junk-article
-finder), then writes a dated report — Markdown + HTML — under
+for title/canonical/meta-description/OG tags/H1/word count, and the
+junk-article finder), then writes a dated report — Markdown + HTML — under
 `reports/` (e.g. `seo-report-2026-11-20-0005.md`) and stores the
 result in `state/last-audit.json` (gitignored) for the next
 comparison. The report shows what was checked, every issue found
