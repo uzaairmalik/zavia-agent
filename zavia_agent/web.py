@@ -19,7 +19,7 @@ from flask import Flask, abort, render_template_string, request, send_from_direc
 from .client import ZaviaClient, ZaviaError
 from .health import check_site
 from .report import REPORTS_DIR, latest_report_info, list_reports
-from .seo import check_sitemap
+from .seo import check_sitemap, check_sitemap_live
 
 app = Flask(__name__)
 
@@ -84,6 +84,9 @@ PAGE = """<!doctype html>
 <h2>SEO check</h2>
 <form method="post" action="/seo"><button type="submit">Run SEO check</button></form>
 {% if seo_msg %}<p class="msg">{{ seo_msg }}</p>{% endif %}
+<form method="post" action="/sitemap-check"><button type="submit">Check every sitemap URL (find dead pages)</button></form>
+<p class="note">Fetches all ~170 URLs in the sitemap and lists the ones that do not return 200 — the dead pages Google still sends clicks to. Takes a minute or so.</p>
+{% if sitemap_msg %}<p class="msg">{{ sitemap_msg }}</p>{% endif %}
 </div>
 
 <div class="card">
@@ -163,7 +166,7 @@ def home():
     return render_template_string(
         PAGE, health=health, health_error=health_error,
         article_count=article_count, token_set=bool(client.token),
-        publish_msg="", seo_msg="", reports=latest_report_info(),
+        publish_msg="", seo_msg="", sitemap_msg="", reports=latest_report_info(),
     )
 
 
@@ -220,7 +223,7 @@ def publish():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg=msg, seo_msg="",
-        reports=latest_report_info(),
+        sitemap_msg="", reports=latest_report_info(),
     )
 
 
@@ -248,7 +251,40 @@ def seo():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg="", seo_msg=msg,
-        reports=latest_report_info(),
+        sitemap_msg="", reports=latest_report_info(),
+    )
+
+
+@app.route("/sitemap-check", methods=["POST"])
+def sitemap_check():
+    """Check every URL in the sitemap and list the dead ones."""
+    client = _client()
+    try:
+        report = check_sitemap_live(client)
+        lines = [report["summary"]]
+        if report["broken"]:
+            lines.append("Dead URLs (Google still sends clicks to these):")
+            for item in report["broken"]:
+                detail = f"HTTP {item['status']}" if item["status"] else f"error: {item['error']}"
+                lines.append(f"  - {item['url']}  ({detail})")
+            if any(item["status"] in (500, 502, 503) for item in report["broken"]):
+                lines.append("Note: several pages returned 500/502/503 — that can be a "
+                             "temporary database drop, not dead pages. Wait a few minutes "
+                             "and run this again before treating them as dead.")
+        msg = "\n".join(lines)
+    except ZaviaError as exc:
+        msg = "Sitemap check failed:\n" + str(exc)
+    except Exception as exc:
+        msg = f"Unexpected error ({type(exc).__name__}): {exc}"
+    try:
+        health = check_site(client, retries=1, delay=0)
+        article_count = health["sitemap"].get("count")
+    except Exception:
+        health, article_count = None, None
+    return render_template_string(
+        PAGE, health=health, health_error="", article_count=article_count,
+        token_set=bool(client.token), publish_msg="", seo_msg="",
+        sitemap_msg=msg, reports=latest_report_info(),
     )
 
 

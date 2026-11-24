@@ -3,7 +3,7 @@
 A small, friendly, ready-to-use agent for the **Zavia blog**
 ([zaviamagazine.dev](https://zaviamagazine.dev)).
 
-It does eight useful jobs, and nothing else:
+It does nine useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
@@ -13,6 +13,7 @@ It does eight useful jobs, and nothing else:
 6. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
 7. **Save an SEO report** — a bulk check or full audit saved as a dated Markdown file, so you have a record to look back at
 8. **Web dashboard** — the same jobs in your browser
+9. **Sitemap liveness check** — every URL in the sitemap fetched, so dead pages (articles lost from the database that Google still links to) get found in one run
 
 Built for Uzair (BCS student, Pakistan). Simple English, a little Roman
 Urdu where natural, and it never crashes on a bad input — it explains
@@ -63,6 +64,7 @@ python -m zavia_agent.cli
  10  Full SEO audit (every article in the sitemap)
  11  Full SEO audit + save report to a file
  12  SEO audit report (full audit + dated report, compared with last run)
+ 13  Sitemap liveness check (every URL in the sitemap — find dead pages)
   0  Exit
 =============================================
 ```
@@ -80,6 +82,7 @@ python -m zavia_agent.cli --seo-report   # full audit + dated report under repor
 python -m zavia_agent.cli --seo --articles slug-one,slug-two --report my-report.md
 python -m zavia_agent.cli --links my-article-slug
 python -m zavia_agent.cli --links   # scan the homepage's links
+python -m zavia_agent.cli --sitemap-check   # every URL in the sitemap, find the dead ones
 python -m zavia_agent.cli --junk
 python -m zavia_agent.cli --list
 python -m zavia_agent.cli --publish examples/sample-article.md
@@ -200,6 +203,32 @@ skipped), and reports any that return a non-200 status. Exit code is 1
 when a broken link is found, so you can run it in a script. Fix broken
 links by updating the article (menu 4 / `--update`) — a dead internal
 link tells Google the site is not looked after.
+
+### Sitemap liveness check (every URL in the sitemap)
+
+```bash
+python -m zavia_agent.cli --sitemap-check
+# Sitemap liveness check — fetching every URL in the sitemap...
+#   ... 25/174 checked
+# Checked 174 URL(s) in the sitemap; 3 broken.
+# Dead URLs (fix or remove these — Google still sends clicks to them):
+#   - https://zaviamagazine.dev/article/my-old-article  (HTTP 404)
+```
+
+The plain SEO check only fetches the first 10 URLs in the sitemap — a
+quick sniff. This one fetches **all** of them (articles, tools, guides,
+Quran pages, everything the sitemap lists) and lists every URL that
+does not return 200. That is the check to run after a database problem:
+an article lost from the database 404s live, but Google still has it
+indexed and still sends clicks to it, so the sitemap quietly fills up
+with dead links. Fix a dead article by re-publishing it at the same
+slug (menu 3 / `--publish`), or remove the page from the sitemap. Exit
+code is 1 when any URL is broken, so you can run it in a script. It
+takes about a minute (one quick request per URL). One caution: if many
+pages fail at once with 500/502/503, the database is probably having
+one of its short drops — wait a few minutes and run it again before
+treating those pages as dead. The dashboard has the same check as a
+button in its SEO card.
 
 ### Web dashboard
 

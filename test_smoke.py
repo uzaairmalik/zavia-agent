@@ -19,7 +19,8 @@ sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 from zavia_agent.client import ZaviaClient, ZaviaError
 from zavia_agent.report import write_seo_report
 from zavia_agent.seo import (_article_word_count, _h1_count, check_article,
-                             check_sitemap_seo, find_duplicate_meta)
+                             check_sitemap_live, check_sitemap_seo,
+                             find_duplicate_meta)
 
 
 def main():
@@ -89,14 +90,19 @@ def main():
     # 5. Single-article check returns the sharper warning fields
     # (canonical match + description length, added Day 6) and the
     # content fields (H1 count + word count, added Day 8).
+    # Presence + types only — the exact H1/word values are live
+    # content and change (a real article can legitimately have 2 H1s
+    # or a long description; the precise logic is covered by the
+    # offline synthetic test 8 below).
     try:
         if not first_slug:
             raise ZaviaError("No article slug from the sitemap to check.")
         one = check_article(client, first_slug)
         ok = ("canonical_matches" in one and "canonical_host_ok" in one
               and isinstance(one.get("description_length"), int)
-              and one.get("h1_count") == 1
-              and isinstance(one.get("word_count"), int) and one["word_count"] > 300)
+              and isinstance(one.get("h1_count"), int) and one["h1_count"] >= 1
+              and (one.get("word_count") is None
+                   or (isinstance(one["word_count"], int) and one["word_count"] > 0)))
         detail = (f"{one['slug']}: canonical_matches={one['canonical_matches']}, "
                   f"description {one['description_length']} chars, "
                   f"h1_count={one['h1_count']}, word_count={one['word_count']}, "
@@ -188,6 +194,53 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("H1 + thin-content checks (offline synthetic pages)", ok, detail))
+
+    # 9. Sitemap liveness check (offline — fake client, no network).
+    # A 404 and a request error both count as broken; a 200 does not;
+    # an all-200 sitemap is OK. Progress is called once per URL.
+    try:
+        class _FakeResp:
+            def __init__(self, status):
+                self.status_code = status
+
+        class _FakeSession:
+            def __init__(self, answers):
+                self._answers = answers
+
+            def get(self, url, timeout=None):
+                answer = self._answers.get(url)
+                if isinstance(answer, Exception):
+                    raise answer
+                return _FakeResp(answer)
+
+        class _FakeLiveClient:
+            def __init__(self, urls, answers):
+                self._urls = urls
+                self.session = _FakeSession(answers)
+
+            def get_sitemap_urls(self):
+                return list(self._urls)
+
+        urls = ["https://zaviamagazine.dev/article/good-one",
+                "https://zaviamagazine.dev/article/dead-one",
+                "https://zaviamagazine.dev/tools/cgpa-calculator",
+                "https://zaviamagazine.dev/article/timeout-one"]
+        answers = {urls[0]: 200, urls[1]: 404, urls[2]: 200,
+                   urls[3]: ConnectionError("boom")}
+        seen = []
+        mixed = check_sitemap_live(_FakeLiveClient(urls, answers),
+                                   progress=lambda d, t: seen.append((d, t)))
+        clean = check_sitemap_live(_FakeLiveClient(urls[:1], {urls[0]: 200}))
+        ok = (mixed["total_urls"] == 4 and len(mixed["broken"]) == 2
+              and mixed["broken"][0]["url"] == urls[1] and mixed["broken"][0]["status"] == 404
+              and mixed["broken"][1]["url"] == urls[3] and mixed["broken"][1]["status"] is None
+              and not mixed["ok"] and len(seen) == 4 and seen[-1] == (4, 4)
+              and clean["ok"] and clean["broken"] == [])
+        detail = (f"mixed sitemap: {mixed['total_urls']} URLs, {len(mixed['broken'])} broken "
+                  f"({mixed['broken'][0]['status']}, error); clean sitemap: ok={clean['ok']}")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Sitemap liveness check (offline fake sitemap)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

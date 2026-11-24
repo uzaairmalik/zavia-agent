@@ -60,6 +60,8 @@ def _counts(**overrides):
         "duplicate_slugs": 0,
         "duplicate_titles": 0,
         "duplicate_descriptions": 0,
+        "thin_articles": 0,
+        "h1_issues": 0,
         "junk_articles": 0,
         "total_issues": 0,
         "fail_issues": 0,

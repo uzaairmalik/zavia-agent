@@ -13,6 +13,7 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --seo-report   (full audit + dated report, compared with the last run)
     python -m zavia_agent.cli --links my-article-slug
     python -m zavia_agent.cli --links   (scan the homepage's links)
+    python -m zavia_agent.cli --sitemap-check
     python -m zavia_agent.cli --list
     python -m zavia_agent.cli --publish examples/sample-article.md
     python -m zavia_agent.cli --update update.json
@@ -31,7 +32,9 @@ from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
 from .report import (compare_reports, default_report_path, load_previous_state,
                      run_audit, write_report, write_seo_report)
-from .seo import check_article, check_articles, check_links, check_sitemap, check_sitemap_seo, find_junk_articles
+from .seo import (check_article, check_articles, check_links,
+                   check_sitemap, check_sitemap_live, check_sitemap_seo,
+                   find_junk_articles)
 
 
 # ---------------------------------------------------------------- front-matter
@@ -242,6 +245,34 @@ def do_seo_all(client, report_path=None):
     return report
 
 
+def do_sitemap_check(client):
+    """Check every URL in the sitemap; print each dead one.
+
+    Returns the report dict (so --sitemap-check can exit non-zero
+    when a URL is broken).
+    """
+    print("\nSitemap liveness check — fetching every URL in the sitemap...")
+    print("This takes a minute or so — one quick request per URL.")
+
+    def _progress(done, total):
+        if done % 25 == 0 or done == total:
+            print(f"  ... {done}/{total} checked")
+
+    report = check_sitemap_live(client, progress=_progress)
+    print("\n" + report["summary"])
+    if report["broken"]:
+        print("Dead URLs (fix or remove these — Google still sends clicks to them):")
+        for item in report["broken"]:
+            detail = f"HTTP {item['status']}" if item["status"] else f"error: {item['error']}"
+            print(f"  - {item['url']}  ({detail})")
+        statuses = {item["status"] for item in report["broken"]}
+        if 500 in statuses or 502 in statuses or 503 in statuses:
+            print("\nNote: several pages returned 500/502/503 — that can be a "
+                  "temporary database drop, not dead pages. Wait a few minutes "
+                  "and run this again before treating them as dead.")
+    return report
+
+
 def do_links(client, slug=None):
     """Scan one page's internal links; print each broken one.
 
@@ -328,6 +359,7 @@ MENU = """
  10  Full SEO audit (every article in the sitemap)
  11  Full SEO audit + save report to a file
  12  SEO audit report (full audit + dated report, compared with last run)
+ 13  Sitemap liveness check (every URL in the sitemap — find dead pages)
   0  Exit
 =============================================
 """
@@ -383,8 +415,10 @@ def interactive(client):
                 do_seo_all(client, report_path="")
             elif choice == "12":
                 do_seo_report(client)
+            elif choice == "13":
+                do_sitemap_check(client)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-12.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-13.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -416,6 +450,8 @@ def main(argv=None):
                              "Give a file name, or leave it off for zavia-seo-report-<today>.md.")
     parser.add_argument("--seo-report", action="store_true",
                         help="Full SEO audit + dated report under reports/, compared with the previous run (Lesson 14 pattern), and exit.")
+    parser.add_argument("--sitemap-check", action="store_true",
+                        help="Check EVERY URL in the sitemap and list the dead ones (not just a 10-URL sample) and exit.")
     args = parser.parse_args(argv)
 
     client = ZaviaClient()
@@ -429,6 +465,9 @@ def main(argv=None):
         if args.seo_report:
             audit = do_seo_report(client)
             return 0 if audit["ok"] else 1
+        if args.sitemap_check:
+            report = do_sitemap_check(client)
+            return 0 if report["ok"] else 1
         if args.seo:
             if args.all:
                 report = do_seo_all(client, report_path=args.report)

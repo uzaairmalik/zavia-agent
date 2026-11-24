@@ -2,6 +2,10 @@
 
 - check_sitemap(): fetch /sitemap.xml, count URLs, find duplicate slugs,
   and fetch a small sample of URLs to catch 404s.
+- check_sitemap_live(): fetch EVERY URL in the sitemap and report any
+  that does not return 200 — the full sweep that catches dead pages
+  the 10-URL sample misses (e.g. articles lost from the database
+  that Google still links to).
 - check_article(slug): fetch one article page, confirm it loads, that a
   <title> is present, that a canonical link is present, and that it has
   a meta description + Open Graph tags (warnings, not failures).
@@ -145,6 +149,71 @@ def check_sitemap(client=None, sample=10, timeout=15):
         "total_urls": len(urls),
         "article_urls": len(article_urls),
         "duplicate_slugs": duplicates,
+        "checked": checked,
+        "broken": broken,
+        "ok": ok,
+        "summary": "; ".join(parts) + ".",
+    }
+
+
+def check_sitemap_live(client=None, timeout=10, progress=None):
+    """Check EVERY URL in the sitemap, not just a sample.
+
+    check_sitemap() above only fetches the first 10 URLs — fine as a
+    quick sniff, but it misses the dead pages further down the list.
+    This one fetches all of them (articles, tools, guides, Quran
+    pages, everything the sitemap lists) and reports every URL that
+    does not return 200.
+
+    Why it matters: when an article is lost from the database it 404s
+    live, but Google still has it indexed and still sends clicks to
+    it — so the sitemap quietly fills up with dead links. This sweep
+    finds them all in one run, so they can be fixed (re-publish the
+    article at the same slug) or removed from the sitemap.
+
+    A 5xx here can also be a temporary database drop (Heroku Postgres
+    drops for ~5-15 minutes at a time) rather than a dead page — if
+    MANY URLs fail at once with 500s, wait a few minutes and run it
+    again before treating them as dead.
+
+    progress: optional callback called as progress(done, total) after
+    each URL, so a long run can show it is still working.
+
+    Returns a dict:
+    {
+      "total_urls": int,
+      "checked": [{"url": str, "status": int|None, "error": str|None}, ...],
+      "broken": [{"url": str, "status": int|None, "error": str|None}, ...],
+      "ok": bool,   # True when every sitemap URL returned 200
+      "summary": str,
+    }
+    Broken means a non-200 status or a request that failed outright.
+    """
+    client = client or ZaviaClient()
+    urls = client.get_sitemap_urls()
+    checked = []
+    broken = []
+    for i, url in enumerate(urls, 1):
+        try:
+            # Plain session GET (no client retries — a URL that needs
+            # three attempts is slow enough to count as broken anyway,
+            # and a retry would hide a flapping database).
+            resp = client.session.get(url, timeout=timeout)
+            status, error = resp.status_code, None
+        except Exception as exc:  # network error, timeout, DNS, ...
+            status, error = None, str(exc)[:120]
+        checked.append({"url": url, "status": status, "error": error})
+        if status != 200:
+            broken.append({"url": url, "status": status, "error": error})
+        if progress:
+            progress(i, len(urls))
+    ok = not broken
+    if broken:
+        parts = [f"Checked {len(urls)} URL(s) in the sitemap; {len(broken)} broken"]
+    else:
+        parts = [f"Checked {len(urls)} URL(s) in the sitemap; all returned 200"]
+    return {
+        "total_urls": len(urls),
         "checked": checked,
         "broken": broken,
         "ok": ok,
