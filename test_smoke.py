@@ -88,12 +88,13 @@ def main():
     results.append(("SEO report export writes a Markdown file", ok, detail))
 
     # 5. Single-article check returns the sharper warning fields
-    # (canonical match + description length, added Day 6) and the
-    # content fields (H1 count + word count, added Day 8).
-    # Presence + types only — the exact H1/word values are live
-    # content and change (a real article can legitimately have 2 H1s
-    # or a long description; the precise logic is covered by the
-    # offline synthetic test 8 below).
+    # (canonical match + description length, added Day 6), the
+    # content fields (H1 count + word count, added Day 8) and the
+    # preview-image fields (og:image + alt + twitter:card, added
+    # Day 10). Presence + types only — the exact H1/word values are
+    # live content and change (a real article can legitimately have
+    # 2 H1s or a long description; the precise logic is covered by
+    # the offline synthetic tests 8 and 9 below).
     try:
         if not first_slug:
             raise ZaviaError("No article slug from the sitemap to check.")
@@ -102,14 +103,20 @@ def main():
               and isinstance(one.get("description_length"), int)
               and isinstance(one.get("h1_count"), int) and one["h1_count"] >= 1
               and (one.get("word_count") is None
-                   or (isinstance(one["word_count"], int) and one["word_count"] > 0)))
+                   or (isinstance(one["word_count"], int) and one["word_count"] > 0))
+              and "og_image_found" in one and "og_image_alt_found" in one
+              and "twitter_card_found" in one
+              and one.get("og_image_ok") in (True, False, None))
         detail = (f"{one['slug']}: canonical_matches={one['canonical_matches']}, "
                   f"description {one['description_length']} chars, "
                   f"h1_count={one['h1_count']}, word_count={one['word_count']}, "
+                  f"og_image={'yes' if one['og_image_found'] else 'no'}"
+                  f" (loads={one['og_image_ok']}), "
+                  f"twitter_card={'yes' if one['twitter_card_found'] else 'no'}, "
                   f"{len(one['warnings'])} warning(s)")
     except ZaviaError as exc:
         ok, detail = False, str(exc)
-    results.append(("Single-article check reports canonical + description length + H1/word count", ok, detail))
+    results.append(("Single-article check reports canonical + description length + H1/word count + preview image", ok, detail))
 
     # 6. Every module imports (the Day 6 refactor broke cli.py + web.py
     # silently by gutting report.py, and had also deleted this guard —
@@ -166,7 +173,10 @@ def main():
                      '<link rel="canonical" href="https://zaviamagazine.dev/article/fake">'
                      '<meta name="description" content="A fine description that is long enough to pass the fifty character minimum.">'
                      '<meta property="og:title" content="Fake Article">'
-                     '<meta property="og:description" content="A fine description."></head>'
+                     '<meta property="og:description" content="A fine description.">'
+                     '<meta property="og:image" content="https://example.com/fake.jpg">'
+                     '<meta property="og:image:alt" content="A fake picture.">'
+                     '<meta name="twitter:card" content="summary_large_image"></head>'
                      "<body><h1>Fake Article</h1><article><p>" + long_body + "</p></article></body></html>")
         short_body = "word " * 40
         short_page = ("<html><head><title>Fake Article</title>"
@@ -195,7 +205,86 @@ def main():
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("H1 + thin-content checks (offline synthetic pages)", ok, detail))
 
-    # 9. Sitemap liveness check (offline — fake client, no network).
+    # 9. Social preview image checks (offline — synthetic pages + a
+    # fake session, no network). A page with no og:image and no
+    # twitter:card warns about both; an og:image that 404s warns
+    # that it does not load; an og:image that loads, with alt text
+    # and a twitter:card, warns about nothing; an og:image whose
+    # fetch fails outright is unknown, not broken — it warns that
+    # the picture could not be checked, with no "does not load".
+    try:
+        class _FakeImgResp:
+            def __init__(self, status):
+                self.status_code = status
+
+            def close(self):
+                pass
+
+        class _FakeImgSession:
+            def __init__(self, answers):
+                self._answers = answers
+
+            def get(self, url, timeout=None, stream=False):
+                answer = self._answers.get(url, 404)
+                if isinstance(answer, Exception):
+                    raise answer
+                return _FakeImgResp(answer)
+
+        class _FakeImgClient:
+            def __init__(self, html_text, answers):
+                self._html = html_text
+                self.session = _FakeImgSession(answers)
+
+            def get_article(self, slug):
+                return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
+                        "status": 200, "title": "Fake Article", "html": self._html}
+
+        def _img_page(image_url=None, alt=True, card=True):
+            head = ("<html><head><title>Fake Article</title>"
+                    '<link rel="canonical" href="https://zaviamagazine.dev/article/fake">'
+                    '<meta name="description" content="A fine description that is long enough to pass the fifty character minimum.">'
+                    '<meta property="og:title" content="Fake Article">'
+                    '<meta property="og:description" content="A fine description.">')
+            if image_url:
+                head += f'<meta property="og:image" content="{image_url}">'
+                if alt:
+                    head += '<meta property="og:image:alt" content="A fake picture.">'
+            if card:
+                head += '<meta name="twitter:card" content="summary_large_image">'
+            return head + "</head><body><h1>Fake Article</h1><article><p>" + "word " * 350 + "</p></article></body></html>"
+
+        good_img = "https://example.com/good.jpg"
+        bad_img = "https://example.com/broken.jpg"
+        slow_img = "https://example.com/slow.jpg"
+        no_img = check_article(_FakeImgClient(_img_page(None, card=False), {}), "fake")
+        broken_img = check_article(_FakeImgClient(_img_page(bad_img), {bad_img: 404}), "fake")
+        good = check_article(_FakeImgClient(_img_page(good_img), {good_img: 200}), "fake")
+        # A fetch that fails outright (timeout, DNS, ...) is unknown,
+        # not broken: og_image_ok stays None and the warning says the
+        # picture could not be checked — no false "broken" flag.
+        slow = check_article(_FakeImgClient(_img_page(slow_img),
+                                            {slow_img: ConnectionError("timed out")}), "fake")
+        ok = (not no_img["og_image_found"] and not no_img["twitter_card_found"]
+              and any("no og:image" in w for w in no_img["warnings"])
+              and any("no twitter:card" in w for w in no_img["warnings"])
+              and broken_img["og_image_found"] and broken_img["og_image_ok"] is False
+              and broken_img["og_image_status"] == 404
+              and any("does not load (HTTP 404)" in w for w in broken_img["warnings"])
+              and good["og_image_found"] and good["og_image_ok"] is True
+              and good["og_image_status"] == 200 and not good["warnings"]
+              and slow["og_image_found"] and slow["og_image_ok"] is None
+              and slow["og_image_status"] is None
+              and any("could not be checked" in w for w in slow["warnings"])
+              and not any("does not load" in w for w in slow["warnings"]))
+        detail = (f"no image: warnings={len(no_img['warnings'])}; "
+                  f"broken image: ok={broken_img['og_image_ok']}, status={broken_img['og_image_status']}; "
+                  f"good image: ok={good['og_image_ok']}, warnings={len(good['warnings'])}; "
+                  f"unreachable image: ok={slow['og_image_ok']}, warnings={len(slow['warnings'])}")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Social preview image checks (offline synthetic pages)", ok, detail))
+
+    # 10. Sitemap liveness check (offline — fake client, no network).
     # A 404 and a request error both count as broken; a 200 does not;
     # an all-200 sitemap is OK. Progress is called once per URL.
     try:

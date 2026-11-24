@@ -8,8 +8,8 @@ Mon/Wed/Fri; this module is Zavia's version of it:
 
 - run_audit(): one audit run. It reuses the checks in seo.py (sitemap
   reachability + URL count, duplicate slugs, a sample of URLs for
-  broken links, per-article title/canonical/meta-description/OG/H1/
-  word-count checks, plus the junk-article finder) and returns one
+  broken links, per-article title/canonical/meta-description/OG/
+  preview-image/H1/word-count checks, plus the junk-article finder) and returns one
   structured result.
 - compare_reports(previous, current): new vs fixed vs ongoing issues,
   plus per-count deltas labelled better/worse/same.
@@ -58,6 +58,7 @@ LOWER_IS_BETTER = (
     "duplicate_descriptions",
     "thin_articles",
     "h1_issues",
+    "og_image_issues",
     "junk_articles",
     "articles_failed",
     "articles_warned",
@@ -94,7 +95,7 @@ def run_audit(client=None, link_sample=10):
       "counts": {total_urls, article_urls, articles_checked,
                  articles_failed, articles_warned, broken_links,
                  duplicate_slugs, duplicate_titles,
-                 duplicate_descriptions, junk_articles,
+                 duplicate_descriptions, junk_articles, og_image_issues,
                  total_issues, fail_issues, warn_issues},
       "issues": [issue dict, ...],   # fails first, then warnings
       "checks": {"sitemap": str, "articles": str, "junk": str},
@@ -149,6 +150,33 @@ def run_audit(client=None, link_sample=10):
             issues.append(_issue(
                 f"article:{slug}:missing-og", "warn", "missing-og", slug,
                 f"Article '{slug}' is missing Open Graph tags (link previews will look plain).",
+            ))
+        # Social preview image (Day 10): no og:image, a broken og:image
+        # URL, no alt text, or no twitter:card. All warnings — the
+        # article loads, but its link preview is picture-less or small.
+        if not result.get("og_image_found"):
+            issues.append(_issue(
+                f"article:{slug}:missing-og-image", "warn", "missing-og-image", slug,
+                f"Article '{slug}' has no og:image (Facebook/WhatsApp link previews will show no picture).",
+            ))
+        elif result.get("og_image_ok") is False:
+            # A real non-200 status (og_image_ok is None, not False,
+            # when the fetch itself failed — an unknown, not a broken
+            # picture — so that case makes no issue here).
+            status = result.get("og_image_status")
+            issues.append(_issue(
+                f"article:{slug}:broken-og-image", "warn", "broken-og-image", slug,
+                f"Article '{slug}' has an og:image that does not load (HTTP {status}) — link previews will show no picture.",
+            ))
+        if result.get("og_image_found") and not result.get("og_image_alt_found"):
+            issues.append(_issue(
+                f"article:{slug}:missing-og-image-alt", "warn", "missing-og-image-alt", slug,
+                f"Article '{slug}' has an og:image but no og:image:alt (screen readers cannot describe the preview picture).",
+            ))
+        if not result.get("twitter_card_found"):
+            issues.append(_issue(
+                f"article:{slug}:missing-twitter-card", "warn", "missing-twitter-card", slug,
+                f"Article '{slug}' has no twitter:card (X link previews fall back to a small summary card).",
             ))
         # Content checks (Day 8): H1 count and thin content. Both are
         # warnings — the article loads and ranks, it just ranks worse.
@@ -213,6 +241,11 @@ def run_audit(client=None, link_sample=10):
             "duplicate_descriptions": len(articles.get("duplicate_descriptions") or []),
             "thin_articles": sum(1 for i in issues if i["kind"] == "thin-content"),
             "h1_issues": sum(1 for i in issues if i["kind"] == "h1"),
+            "og_image_issues": sum(
+                1 for i in issues
+                if i["kind"] in ("missing-og-image", "broken-og-image",
+                                 "missing-og-image-alt", "missing-twitter-card")
+            ),
             "junk_articles": len(junk["junk"]),
             "total_issues": len(issues),
             "fail_issues": fail_count,
@@ -340,15 +373,16 @@ def _count_rows(audit):
     return [
         ("URLs in sitemap", counts["total_urls"]),
         ("Article URLs in sitemap", counts["article_urls"]),
-        ("Articles checked (title, canonical, meta description, OG tags)", counts["articles_checked"]),
+        ("Articles checked (title, canonical, meta description, OG tags, preview image)", counts["articles_checked"]),
         ("Articles failed (404 / no title / no canonical)", counts["articles_failed"]),
-        ("Articles with warnings (missing description or OG tags)", counts["articles_warned"]),
+        ("Articles with warnings (missing description, OG tags, or preview image)", counts["articles_warned"]),
         ("Broken links in the sitemap sample", counts["broken_links"]),
         ("Duplicate slugs in the sitemap", counts["duplicate_slugs"]),
         ("Duplicate titles shared by 2+ articles", counts["duplicate_titles"]),
         ("Duplicate meta descriptions shared by 2+ articles", counts["duplicate_descriptions"]),
         ("Thin articles (under 300 words in the body)", counts["thin_articles"]),
         ("Articles with a wrong H1 count (not exactly one)", counts["h1_issues"]),
+        ("Social preview image problems (no og:image / broken og:image / no og:image:alt / no twitter:card)", counts["og_image_issues"]),
         ("Junk / test articles still live", counts["junk_articles"]),
         ("Total issues", counts["total_issues"]),
         ("— of which FAIL (must fix)", counts["fail_issues"]),

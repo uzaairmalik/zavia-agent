@@ -14,7 +14,12 @@
   (> 160 chars, Google truncates it). It also checks the article's
   own content: exactly one <h1> heading, and a word count of the
   article body (under 300 words counts as thin content — Google may
-  treat it as low value). Both are warnings, not failures.
+  treat it as low value). Both are warnings, not failures. And it
+  checks the social preview image: an og:image tag, an og:image:alt
+  tag and a twitter:card tag — and it actually fetches the og:image
+  URL, because a preview picture that 404s (a stale Vercel Blob link,
+  for example) leaves Facebook/WhatsApp/X previews picture-less.
+  A missing or broken preview image is a warning, not a failure.
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
@@ -62,6 +67,12 @@ THIN_CONTENT_WORDS = 300
 DESCRIPTION_RE = re.compile(r'<meta[^>]+name=["\']description["\'][^>]*>', re.IGNORECASE)
 OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]*>', re.IGNORECASE)
 OG_DESC_RE = re.compile(r'<meta[^>]+property=["\']og:description["\'][^>]*>', re.IGNORECASE)
+# Social preview image (Day 10): the picture Facebook/WhatsApp/X show
+# for the link. og:image:alt describes it for screen readers, and
+# twitter:card picks the large-image layout on X.
+OG_IMAGE_RE = re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]*>', re.IGNORECASE)
+OG_IMAGE_ALT_RE = re.compile(r'<meta[^>]+property=["\']og:image:alt["\'][^>]*>', re.IGNORECASE)
+TWITTER_CARD_RE = re.compile(r'<meta[^>]+name=["\']twitter:card["\'][^>]*>', re.IGNORECASE)
 CONTENT_RE = re.compile(r'content=["\']([^"\']*)["\']', re.IGNORECASE)
 
 
@@ -249,6 +260,18 @@ def check_article(client, slug):
       rank as low value. When the page has no <article> tag the word
       count cannot be measured, so no thin-content warning is given.
 
+    Social preview image warnings (Day 10) — also warnings, not
+    failures:
+    - No og:image tag — Facebook/WhatsApp show the link with no
+      picture. The og:image URL is also fetched: a non-200 status
+      (or a request that fails outright) means the preview picture
+      is broken — Zavia's images live on Vercel Blob storage, so a
+      stale link 404s silently. A relative og:image URL is resolved
+      against the article's own URL first.
+    - No og:image:alt — screen readers cannot describe the picture.
+    - No twitter:card — X falls back to a small summary card
+      instead of the large-image layout.
+
     Returns a dict:
     {
       "slug": str, "url": str, "status": int|None,
@@ -260,9 +283,19 @@ def check_article(client, slug):
       "description_full": str,   # full description, entities unescaped
       "description_length": int,   # chars, after unescaping entities
       "og_title_found": bool, "og_description_found": bool,
+      "og_image": str,   # the og:image URL as written in the tag ("" when missing)
+      "og_image_found": bool,
+      "og_image_ok": bool|None,   # True when the image URL returned 200,
+                                  # False when it returned something else,
+                                  # None when there was no image to check,
+                                  # no session to fetch it with, or the
+                                  # fetch failed (unknown, not broken)
+      "og_image_status": int|None,   # HTTP status of the image fetch
+      "og_image_alt_found": bool,
+      "twitter_card_found": bool,
       "h1_count": int,   # <h1> headings found (should be exactly 1)
       "word_count": int|None,   # words in the <article> body (None when no <article> tag)
-      "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length / H1 / thin content (not fatal)
+      "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length / H1 / thin content / preview image (not fatal)
       "ok": bool, "summary": str,
     }
     """
@@ -297,6 +330,47 @@ def check_article(client, slug):
     description_length = len(html.unescape(description)) if description_found else 0
     og_title_found = bool(OG_TITLE_RE.search(html_text))
     og_description_found = bool(OG_DESC_RE.search(html_text))
+    # Social preview image (Day 10): the tag, its alt text, the X card,
+    # and — when the tag is there — whether the picture URL loads.
+    og_image = ""
+    og_image_found = False
+    match = OG_IMAGE_RE.search(html_text)
+    if match:
+        content = CONTENT_RE.search(match.group(0))
+        if content:
+            og_image = content.group(1).strip()
+            og_image_found = bool(og_image)
+    og_image_alt_found = bool(OG_IMAGE_ALT_RE.search(html_text))
+    twitter_card_found = bool(TWITTER_CARD_RE.search(html_text))
+    og_image_ok = None
+    og_image_status = None
+    og_image_error = None
+    if og_image_found:
+        # A fake/test client has no session — then the image cannot be
+        # fetched, so no claim is made either way (og_image_ok stays
+        # None and no warning is given). A real client always has one.
+        session = getattr(client, "session", None)
+        if session is not None:
+            image_url = urljoin(info["url"], og_image)
+            try:
+                # stream=True: only the headers are read — the picture
+                # itself is never downloaded, this is just a liveness
+                # check, and the response is closed straight away.
+                # 10s, not 5: the blob host is sometimes slow from
+                # here, and a slow reply is not a broken picture.
+                resp = session.get(image_url, timeout=10, stream=True)
+                try:
+                    og_image_status = resp.status_code
+                    og_image_ok = resp.status_code == 200
+                finally:
+                    resp.close()
+            except Exception as exc:  # network error, timeout, DNS, ...
+                # Unknown, NOT broken: a timeout says the picture
+                # could not be checked, not that it is gone. So
+                # og_image_ok stays None (no false "broken" flag),
+                # and the warning says so plainly.
+                og_image_ok = None
+                og_image_error = str(exc)[:120]
     h1_count = _h1_count(html_text)
     word_count = _article_word_count(html_text)
     warnings = []
@@ -314,6 +388,19 @@ def check_article(client, slug):
             warnings.append(f"meta description is long ({description_length} chars) — Google truncates it after ~160")
         if not og_title_found or not og_description_found:
             warnings.append("missing Open Graph tags (link previews on Facebook/WhatsApp will look plain)")
+        if not og_image_found:
+            warnings.append("no og:image (Facebook/WhatsApp link previews will show no picture)")
+        elif og_image_ok is False:
+            warnings.append(f"og:image does not load (HTTP {og_image_status}) — link previews will show no picture")
+        elif og_image_ok is None and og_image_error is not None:
+            # Checked but unreachable (timeout, DNS, ...). og_image_error
+            # is only set when a fetch was attempted, so a fake/test
+            # client with no session gives no warning here.
+            warnings.append(f"og:image could not be checked ({og_image_error}) — could not confirm the preview picture loads")
+        if og_image_found and not og_image_alt_found:
+            warnings.append("no og:image:alt (screen readers cannot describe the preview picture)")
+        if not twitter_card_found:
+            warnings.append("no twitter:card (X link previews fall back to a small summary card)")
         if h1_count == 0:
             warnings.append("no <h1> heading — Google uses the H1 to understand what the page is about")
         elif h1_count > 1:
@@ -347,6 +434,12 @@ def check_article(client, slug):
         "description_length": description_length,
         "og_title_found": og_title_found,
         "og_description_found": og_description_found,
+        "og_image": og_image,
+        "og_image_found": og_image_found,
+        "og_image_ok": og_image_ok,
+        "og_image_status": og_image_status,
+        "og_image_alt_found": og_image_alt_found,
+        "twitter_card_found": twitter_card_found,
         "h1_count": h1_count,
         "word_count": word_count,
         "warnings": warnings,
@@ -424,6 +517,12 @@ def _failed_result(slug, exc):
         "description_found": False, "description_length": 0,
         "og_title_found": False,
         "og_description_found": False,
+        "og_image": "",
+        "og_image_found": False,
+        "og_image_ok": None,
+        "og_image_status": None,
+        "og_image_alt_found": False,
+        "twitter_card_found": False,
         "h1_count": 0,
         "word_count": None,
         "warnings": [], "ok": False,
@@ -490,7 +589,7 @@ def check_sitemap_seo(client=None, limit=150, progress=None):
     """Check SEO tags on EVERY article in the sitemap.
 
     Same per-article checks as check_articles (title, canonical, meta
-    description, OG tags, H1 count, article word count), but the slugs
+    description, OG tags, preview image, H1 count, article word count), but the slugs
     come from the sitemap itself — no list to type. A weekly sweep: it
     catches the articles Uzair forgot to check one by one.
 
