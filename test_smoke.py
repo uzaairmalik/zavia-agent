@@ -89,12 +89,13 @@ def main():
 
     # 5. Single-article check returns the sharper warning fields
     # (canonical match + description length, added Day 6), the
-    # content fields (H1 count + word count, added Day 8) and the
+    # content fields (H1 count + word count, added Day 8), the
     # preview-image fields (og:image + alt + twitter:card, added
-    # Day 10). Presence + types only — the exact H1/word values are
-    # live content and change (a real article can legitimately have
-    # 2 H1s or a long description; the precise logic is covered by
-    # the offline synthetic tests 8 and 9 below).
+    # Day 10) and the structured-data fields (JSON-LD + Article
+    # schema, added Day 11). Presence + types only — the exact
+    # H1/word values are live content and change (a real article can
+    # legitimately have 2 H1s or a long description; the precise
+    # logic is covered by the offline synthetic tests 8, 9 and 11).
     try:
         if not first_slug:
             raise ZaviaError("No article slug from the sitemap to check.")
@@ -106,17 +107,22 @@ def main():
                    or (isinstance(one["word_count"], int) and one["word_count"] > 0))
               and "og_image_found" in one and "og_image_alt_found" in one
               and "twitter_card_found" in one
-              and one.get("og_image_ok") in (True, False, None))
+              and one.get("og_image_ok") in (True, False, None)
+              and "jsonld_found" in one and "article_schema_found" in one
+              and isinstance(one.get("jsonld_blocks"), int)
+              and isinstance(one.get("schema_headline_found"), bool))
         detail = (f"{one['slug']}: canonical_matches={one['canonical_matches']}, "
                   f"description {one['description_length']} chars, "
                   f"h1_count={one['h1_count']}, word_count={one['word_count']}, "
                   f"og_image={'yes' if one['og_image_found'] else 'no'}"
                   f" (loads={one['og_image_ok']}), "
                   f"twitter_card={'yes' if one['twitter_card_found'] else 'no'}, "
+                  f"jsonld={one['jsonld_blocks']} block(s), "
+                  f"article_schema={one['article_schema_type']}, "
                   f"{len(one['warnings'])} warning(s)")
     except ZaviaError as exc:
         ok, detail = False, str(exc)
-    results.append(("Single-article check reports canonical + description length + H1/word count + preview image", ok, detail))
+    results.append(("Single-article check reports canonical + description length + H1/word count + preview image + structured data", ok, detail))
 
     # 6. Every module imports (the Day 6 refactor broke cli.py + web.py
     # silently by gutting report.py, and had also deleted this guard —
@@ -176,7 +182,11 @@ def main():
                      '<meta property="og:description" content="A fine description.">'
                      '<meta property="og:image" content="https://example.com/fake.jpg">'
                      '<meta property="og:image:alt" content="A fake picture.">'
-                     '<meta name="twitter:card" content="summary_large_image"></head>'
+                     '<meta name="twitter:card" content="summary_large_image">'
+                     '<script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting",'
+                     '"headline":"Fake Article","datePublished":"2026-11-25T00:00:00Z",'
+                     '"author":{"@type":"Person","name":"Uzair Malik"},'
+                     '"image":"https://example.com/fake.jpg"}</script></head>'
                      "<body><h1>Fake Article</h1><article><p>" + long_body + "</p></article></body></html>")
         short_body = "word " * 40
         short_page = ("<html><head><title>Fake Article</title>"
@@ -251,6 +261,10 @@ def main():
                     head += '<meta property="og:image:alt" content="A fake picture.">'
             if card:
                 head += '<meta name="twitter:card" content="summary_large_image">'
+            head += ('<script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting",'
+                     '"headline":"Fake Article","datePublished":"2026-11-25T00:00:00Z",'
+                     '"author":{"@type":"Person","name":"Uzair Malik"},'
+                     '"image":"https://example.com/fake.jpg"}</script>')
             return head + "</head><body><h1>Fake Article</h1><article><p>" + "word " * 350 + "</p></article></body></html>"
 
         good_img = "https://example.com/good.jpg"
@@ -330,6 +344,70 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("Sitemap liveness check (offline fake sitemap)", ok, detail))
+
+    # 11. Structured data (JSON-LD) checks (offline — synthetic
+    # pages, no network). A page with a valid BlogPosting node
+    # carrying headline/datePublished/author/image warns about
+    # nothing; a page with no JSON-LD warns that it has none; a
+    # page whose JSON-LD does not parse warns that it is broken
+    # (and that no Article node was found); a page whose Article
+    # node sits inside an @graph and is missing author and image
+    # warns about exactly those two fields.
+    try:
+        class _FakeSchemaClient:
+            def __init__(self, html_text):
+                self._html = html_text
+
+            def get_article(self, slug):
+                return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
+                        "status": 200, "title": "Fake Article", "html": self._html}
+
+        def _schema_page(jsonld):
+            head = ("<html><head><title>Fake Article</title>"
+                    '<link rel="canonical" href="https://zaviamagazine.dev/article/fake">'
+                    '<meta name="description" content="A fine description that is long enough to pass the fifty character minimum.">'
+                    '<meta property="og:title" content="Fake Article">'
+                    '<meta property="og:description" content="A fine description.">'
+                    '<meta property="og:image" content="https://example.com/fake.jpg">'
+                    '<meta property="og:image:alt" content="A fake picture.">'
+                    '<meta name="twitter:card" content="summary_large_image">')
+            if jsonld is not None:
+                head += '<script type="application/ld+json">' + jsonld + "</script>"
+            return head + "</head><body><h1>Fake Article</h1><article><p>" + "word " * 350 + "</p></article></body></html>"
+
+        good_jsonld = ('{"@context":"https://schema.org","@type":"BlogPosting",'
+                       '"headline":"Fake Article","datePublished":"2026-11-25T00:00:00Z",'
+                       '"author":{"@type":"Person","name":"Uzair Malik"},'
+                       '"image":"https://example.com/fake.jpg"}')
+        graph_jsonld = ('{"@context":"https://schema.org","@graph":['
+                        '{"@type":"Organization","name":"Zavia"},'
+                        '{"@type":"BlogPosting","headline":"Fake Article",'
+                        '"datePublished":"2026-11-25T00:00:00Z"}]}')
+        good = check_article(_FakeSchemaClient(_schema_page(good_jsonld)), "fake")
+        no_ld = check_article(_FakeSchemaClient(_schema_page(None)), "fake")
+        broken = check_article(_FakeSchemaClient(_schema_page("{not json")), "fake")
+        graph = check_article(_FakeSchemaClient(_schema_page(graph_jsonld)), "fake")
+        ok = (good["article_schema_found"] and good["article_schema_type"] == "BlogPosting"
+              and good["jsonld_blocks"] == 1 and good["jsonld_invalid"] == 0
+              and good["schema_headline_found"] and good["schema_date_published_found"]
+              and good["schema_author_found"] and good["schema_image_found"]
+              and not good["warnings"]
+              and not no_ld["jsonld_found"]
+              and any("no structured data (JSON-LD)" in w for w in no_ld["warnings"])
+              and broken["jsonld_blocks"] == 1 and broken["jsonld_invalid"] == 1
+              and any("structured data is broken" in w for w in broken["warnings"])
+              and any("no Article structured data" in w for w in broken["warnings"])
+              and graph["article_schema_found"] and graph["article_schema_type"] == "BlogPosting"
+              and graph["schema_headline_found"] and graph["schema_date_published_found"]
+              and not graph["schema_author_found"] and not graph["schema_image_found"]
+              and any("structured data is missing author, image" in w for w in graph["warnings"]))
+        detail = (f"good: schema={good['article_schema_type']}, warnings={len(good['warnings'])}; "
+                  f"no JSON-LD: warnings={len(no_ld['warnings'])}; "
+                  f"broken: invalid={broken['jsonld_invalid']}, warnings={len(broken['warnings'])}; "
+                  f"@graph: warnings={len(graph['warnings'])}")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Structured data (JSON-LD) checks (offline synthetic pages)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

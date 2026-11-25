@@ -9,7 +9,7 @@ Mon/Wed/Fri; this module is Zavia's version of it:
 - run_audit(): one audit run. It reuses the checks in seo.py (sitemap
   reachability + URL count, duplicate slugs, a sample of URLs for
   broken links, per-article title/canonical/meta-description/OG/
-  preview-image/H1/word-count checks, plus the junk-article finder) and returns one
+  preview-image/H1/word-count/structured-data checks, plus the junk-article finder) and returns one
   structured result.
 - compare_reports(previous, current): new vs fixed vs ongoing issues,
   plus per-count deltas labelled better/worse/same.
@@ -59,6 +59,7 @@ LOWER_IS_BETTER = (
     "thin_articles",
     "h1_issues",
     "og_image_issues",
+    "structured_data_issues",
     "junk_articles",
     "articles_failed",
     "articles_warned",
@@ -96,6 +97,7 @@ def run_audit(client=None, link_sample=10):
                  articles_failed, articles_warned, broken_links,
                  duplicate_slugs, duplicate_titles,
                  duplicate_descriptions, junk_articles, og_image_issues,
+                 structured_data_issues,
                  total_issues, fail_issues, warn_issues},
       "issues": [issue dict, ...],   # fails first, then warnings
       "checks": {"sitemap": str, "articles": str, "junk": str},
@@ -178,6 +180,39 @@ def run_audit(client=None, link_sample=10):
                 f"article:{slug}:missing-twitter-card", "warn", "missing-twitter-card", slug,
                 f"Article '{slug}' has no twitter:card (X link previews fall back to a small summary card).",
             ))
+        # Structured data (Day 11): no JSON-LD at all, a broken
+        # JSON-LD block, no Article node, or an Article node missing
+        # the fields Google needs for a rich result. All warnings —
+        # the article loads and ranks, it just cannot appear as a
+        # rich result.
+        if not result.get("jsonld_found"):
+            issues.append(_issue(
+                f"article:{slug}:missing-jsonld", "warn", "missing-jsonld", slug,
+                f"Article '{slug}' has no structured data (JSON-LD) — Google cannot show rich results for it.",
+            ))
+        else:
+            if result.get("jsonld_invalid"):
+                issues.append(_issue(
+                    f"article:{slug}:broken-jsonld", "warn", "broken-jsonld", slug,
+                    f"Article '{slug}' has {result['jsonld_invalid']} invalid JSON-LD block(s) — Google ignores broken structured data.",
+                ))
+            if not result.get("article_schema_found"):
+                issues.append(_issue(
+                    f"article:{slug}:missing-article-schema", "warn", "missing-article-schema", slug,
+                    f"Article '{slug}' has JSON-LD but no Article structured data (Article / NewsArticle / BlogPosting) — Google cannot show it as a rich result.",
+                ))
+            else:
+                missing_fields = [label for label, key in (
+                    ("headline", "schema_headline_found"),
+                    ("datePublished", "schema_date_published_found"),
+                    ("author", "schema_author_found"),
+                    ("image", "schema_image_found"),
+                ) if not result.get(key)]
+                if missing_fields:
+                    issues.append(_issue(
+                        f"article:{slug}:incomplete-article-schema", "warn", "incomplete-article-schema", slug,
+                        f"Article '{slug}' structured data is missing {', '.join(missing_fields)} — Google's article rich result needs these.",
+                    ))
         # Content checks (Day 8): H1 count and thin content. Both are
         # warnings — the article loads and ranks, it just ranks worse.
         h1_count = result.get("h1_count")
@@ -245,6 +280,11 @@ def run_audit(client=None, link_sample=10):
                 1 for i in issues
                 if i["kind"] in ("missing-og-image", "broken-og-image",
                                  "missing-og-image-alt", "missing-twitter-card")
+            ),
+            "structured_data_issues": sum(
+                1 for i in issues
+                if i["kind"] in ("missing-jsonld", "broken-jsonld",
+                                 "missing-article-schema", "incomplete-article-schema")
             ),
             "junk_articles": len(junk["junk"]),
             "total_issues": len(issues),
@@ -373,7 +413,7 @@ def _count_rows(audit):
     return [
         ("URLs in sitemap", counts["total_urls"]),
         ("Article URLs in sitemap", counts["article_urls"]),
-        ("Articles checked (title, canonical, meta description, OG tags, preview image)", counts["articles_checked"]),
+        ("Articles checked (title, canonical, meta description, OG tags, preview image, structured data)", counts["articles_checked"]),
         ("Articles failed (404 / no title / no canonical)", counts["articles_failed"]),
         ("Articles with warnings (missing description, OG tags, or preview image)", counts["articles_warned"]),
         ("Broken links in the sitemap sample", counts["broken_links"]),
@@ -383,6 +423,7 @@ def _count_rows(audit):
         ("Thin articles (under 300 words in the body)", counts["thin_articles"]),
         ("Articles with a wrong H1 count (not exactly one)", counts["h1_issues"]),
         ("Social preview image problems (no og:image / broken og:image / no og:image:alt / no twitter:card)", counts["og_image_issues"]),
+        ("Structured data problems (no JSON-LD / broken JSON-LD / no Article schema / missing headline, datePublished, author or image)", counts["structured_data_issues"]),
         ("Junk / test articles still live", counts["junk_articles"]),
         ("Total issues", counts["total_issues"]),
         ("— of which FAIL (must fix)", counts["fail_issues"]),

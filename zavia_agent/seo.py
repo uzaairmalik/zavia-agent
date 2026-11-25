@@ -20,6 +20,13 @@
   URL, because a preview picture that 404s (a stale Vercel Blob link,
   for example) leaves Facebook/WhatsApp/X previews picture-less.
   A missing or broken preview image is a warning, not a failure.
+  And it checks the structured data: the page should carry JSON-LD
+  with an Article node (Article / NewsArticle / BlogPosting — top
+  level or inside an @graph) holding headline, datePublished, author
+  and image, so Google can show the article as a rich result. A
+  JSON-LD block that does not parse as JSON is broken structured
+  data — Google ignores it. Missing or broken structured data is a
+  warning, not a failure.
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
@@ -35,6 +42,7 @@ Nothing here needs a token — these are plain public-page checks.
 """
 
 import html
+import json
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -74,6 +82,17 @@ OG_IMAGE_RE = re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]*>', re.IGNO
 OG_IMAGE_ALT_RE = re.compile(r'<meta[^>]+property=["\']og:image:alt["\'][^>]*>', re.IGNORECASE)
 TWITTER_CARD_RE = re.compile(r'<meta[^>]+name=["\']twitter:card["\'][^>]*>', re.IGNORECASE)
 CONTENT_RE = re.compile(r'content=["\']([^"\']*)["\']', re.IGNORECASE)
+# Structured data (Day 11): JSON-LD blocks in <script> tags. Zavia
+# writes one block per page (BlogPosting, BreadcrumbList, and a
+# @graph with Organization/WebSite), so a page can hold several.
+JSONLD_RE = re.compile(
+    r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
+# @type values that mark the article itself (Google's article
+# rich-result types). A node with one of these is "the article" in
+# the structured data, wherever it sits in the page.
+ARTICLE_SCHEMA_TYPES = ("Article", "NewsArticle", "BlogPosting")
 
 
 def _slug_of(url):
@@ -104,6 +123,95 @@ def _article_word_count(html_text):
 def _h1_count(html_text):
     """How many <h1> headings the page has (a page should have exactly one)."""
     return len(H1_RE.findall(html_text or ""))
+
+
+def _schema_nodes(data):
+    """Yield every dict node in one parsed JSON-LD block.
+
+    A block is usually a single object, but Zavia also uses @graph
+    (a list of nodes under one block) — walk both, so an Article
+    node sitting inside a @graph is still found.
+    """
+    if isinstance(data, dict):
+        yield data
+        graph = data.get("@graph")
+        if isinstance(graph, list):
+            for node in graph:
+                if isinstance(node, dict):
+                    yield node
+    elif isinstance(data, list):
+        for node in data:
+            if isinstance(node, dict):
+                yield node
+
+
+def _node_types(node):
+    """The @type value(s) of a JSON-LD node, as a list of strings."""
+    value = node.get("@type")
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str)]
+    return []
+
+
+def _structured_data(html_text):
+    """Structured data (JSON-LD) on a page.
+
+    Finds every <script type="application/ld+json"> block, parses it,
+    and looks for an article node (Article / NewsArticle /
+    BlogPosting — top level or inside an @graph). For that node it
+    checks the fields Google needs for an article rich result:
+    headline, datePublished, author and image.
+
+    Returns a dict:
+    {
+      "jsonld_found": bool,   # any ld+json block at all
+      "jsonld_blocks": int,   # blocks found
+      "jsonld_invalid": int,  # blocks that did not parse as JSON
+      "article_schema_found": bool,
+      "article_schema_type": str|None,   # e.g. "BlogPosting"
+      "schema_headline_found": bool,
+      "schema_date_published_found": bool,
+      "schema_author_found": bool,
+      "schema_image_found": bool,
+    }
+    A block that does not parse is broken structured data — Google
+    ignores it, so it counts as invalid, not as a missing article.
+    """
+    blocks = JSONLD_RE.findall(html_text or "")
+    invalid = 0
+    article = None
+    article_type = None
+    for raw in blocks:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            invalid += 1
+            continue
+        for node in _schema_nodes(data):
+            if article is not None:
+                break
+            for type_name in _node_types(node):
+                if type_name in ARTICLE_SCHEMA_TYPES:
+                    article = node
+                    article_type = type_name
+                    break
+
+    def _has(key):
+        return bool(article and article.get(key))
+
+    return {
+        "jsonld_found": len(blocks) > 0,
+        "jsonld_blocks": len(blocks),
+        "jsonld_invalid": invalid,
+        "article_schema_found": article is not None,
+        "article_schema_type": article_type,
+        "schema_headline_found": _has("headline"),
+        "schema_date_published_found": _has("datePublished"),
+        "schema_author_found": _has("author"),
+        "schema_image_found": _has("image"),
+    }
 
 
 def check_sitemap(client=None, sample=10, timeout=15):
@@ -272,6 +380,18 @@ def check_article(client, slug):
     - No twitter:card — X falls back to a small summary card
       instead of the large-image layout.
 
+    Structured data warnings (Day 11) — also warnings, not
+    failures:
+    - No JSON-LD at all — Google cannot show rich results for the
+      article.
+    - A JSON-LD block that does not parse as JSON — broken
+      structured data, which Google ignores.
+    - JSON-LD present but no Article node (Article / NewsArticle /
+      BlogPosting, top level or inside an @graph) — Google cannot
+      show the article as a rich result.
+    - An Article node missing headline, datePublished, author or
+      image — Google's article rich result needs those fields.
+
     Returns a dict:
     {
       "slug": str, "url": str, "status": int|None,
@@ -295,7 +415,16 @@ def check_article(client, slug):
       "twitter_card_found": bool,
       "h1_count": int,   # <h1> headings found (should be exactly 1)
       "word_count": int|None,   # words in the <article> body (None when no <article> tag)
-      "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length / H1 / thin content / preview image (not fatal)
+      "jsonld_found": bool,   # any <script type="application/ld+json"> block
+      "jsonld_blocks": int,   # JSON-LD blocks found
+      "jsonld_invalid": int,   # blocks that did not parse as JSON
+      "article_schema_found": bool,   # an Article / NewsArticle / BlogPosting node
+      "article_schema_type": str|None,   # e.g. "BlogPosting"
+      "schema_headline_found": bool,
+      "schema_date_published_found": bool,
+      "schema_author_found": bool,
+      "schema_image_found": bool,
+      "warnings": [str, ...],   # missing description / OG tags / bad canonical / odd description length / H1 / thin content / preview image / structured data (not fatal)
       "ok": bool, "summary": str,
     }
     """
@@ -373,6 +502,7 @@ def check_article(client, slug):
                 og_image_error = str(exc)[:120]
     h1_count = _h1_count(html_text)
     word_count = _article_word_count(html_text)
+    schema = _structured_data(html_text)
     warnings = []
     if info["status"] == 200:
         if canonical is not None:
@@ -407,6 +537,26 @@ def check_article(client, slug):
             warnings.append(f"{h1_count} <h1> headings — a page should have exactly one")
         if word_count is not None and word_count < THIN_CONTENT_WORDS:
             warnings.append(f"thin content — only {word_count} words in the article body (aim for 300+)")
+        # Structured data (Day 11): JSON-LD with an Article node.
+        if not schema["jsonld_found"]:
+            warnings.append("no structured data (JSON-LD) — Google cannot show rich results for this article")
+        else:
+            if schema["jsonld_invalid"]:
+                warnings.append(f"structured data is broken ({schema['jsonld_invalid']} invalid JSON-LD block(s)) — Google ignores broken structured data")
+            if not schema["article_schema_found"]:
+                warnings.append("no Article structured data (Article / NewsArticle / BlogPosting) — Google cannot show this article as a rich result")
+            else:
+                missing_fields = []
+                if not schema["schema_headline_found"]:
+                    missing_fields.append("headline")
+                if not schema["schema_date_published_found"]:
+                    missing_fields.append("datePublished")
+                if not schema["schema_author_found"]:
+                    missing_fields.append("author")
+                if not schema["schema_image_found"]:
+                    missing_fields.append("image")
+                if missing_fields:
+                    warnings.append(f"structured data is missing {', '.join(missing_fields)} — Google's article rich result needs these")
     ok = info["status"] == 200 and title_found and canonical is not None
     if info["status"] == 404:
         summary = f"Article '{slug}' is a 404 (not found)."
@@ -442,6 +592,15 @@ def check_article(client, slug):
         "twitter_card_found": twitter_card_found,
         "h1_count": h1_count,
         "word_count": word_count,
+        "jsonld_found": schema["jsonld_found"],
+        "jsonld_blocks": schema["jsonld_blocks"],
+        "jsonld_invalid": schema["jsonld_invalid"],
+        "article_schema_found": schema["article_schema_found"],
+        "article_schema_type": schema["article_schema_type"],
+        "schema_headline_found": schema["schema_headline_found"],
+        "schema_date_published_found": schema["schema_date_published_found"],
+        "schema_author_found": schema["schema_author_found"],
+        "schema_image_found": schema["schema_image_found"],
         "warnings": warnings,
         "ok": ok,
         "summary": summary,
@@ -525,6 +684,15 @@ def _failed_result(slug, exc):
         "twitter_card_found": False,
         "h1_count": 0,
         "word_count": None,
+        "jsonld_found": False,
+        "jsonld_blocks": 0,
+        "jsonld_invalid": 0,
+        "article_schema_found": False,
+        "article_schema_type": None,
+        "schema_headline_found": False,
+        "schema_date_published_found": False,
+        "schema_author_found": False,
+        "schema_image_found": False,
         "warnings": [], "ok": False,
         "summary": f"Article '{slug}' could not be checked: {exc}",
     }
@@ -589,8 +757,9 @@ def check_sitemap_seo(client=None, limit=150, progress=None):
     """Check SEO tags on EVERY article in the sitemap.
 
     Same per-article checks as check_articles (title, canonical, meta
-    description, OG tags, preview image, H1 count, article word count), but the slugs
-    come from the sitemap itself — no list to type. A weekly sweep: it
+    description, OG tags, preview image, H1 count, article word count,
+    structured data), but the slugs come from the sitemap itself — no list to type.
+    A weekly sweep: it catches the articles Uzair forgot to check one by one.
     catches the articles Uzair forgot to check one by one.
 
     limit: max articles to check (the sitemap holds ~70 articles; the

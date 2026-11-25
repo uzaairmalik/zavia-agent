@@ -7,7 +7,7 @@ It does nine useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
-3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once. It also warns when a canonical points at the wrong page (or a different site), when a meta description is too short (< 50 chars) or too long (> 160 chars — Google cuts it off), when two or more articles share the same title or meta description (Google shows the same title/snippet for both), when a page has no `<h1>` heading or more than one, when an article is thin content (under 300 words in the body), and when the social preview image is missing or broken — no `og:image`, no `og:image:alt`, no `twitter:card`, or an `og:image` URL that does not load (Zavia's pictures live on Vercel Blob storage, so a stale link 404s and Facebook/WhatsApp/X previews come out picture-less).
+3. **SEO check** — sitemap, duplicate slugs, broken links, one article's title + canonical + meta description + Open Graph tags, or several articles at once. It also warns when a canonical points at the wrong page (or a different site), when a meta description is too short (< 50 chars) or too long (> 160 chars — Google cuts it off), when two or more articles share the same title or meta description (Google shows the same title/snippet for both), when a page has no `<h1>` heading or more than one, when an article is thin content (under 300 words in the body), when the social preview image is missing or broken — no `og:image`, no `og:image:alt`, no `twitter:card`, or an `og:image` URL that does not load (Zavia's pictures live on Vercel Blob storage, so a stale link 404s and Facebook/WhatsApp/X previews come out picture-less) — and when the article's structured data is missing or broken: no JSON-LD at all, a JSON-LD block that does not parse as JSON, no Article node (Article / NewsArticle / BlogPosting), or an Article node missing headline, datePublished, author or image (Google cannot show the article as a rich result without it).
 4. **Full SEO audit** — the same title/canonical/description/OG check on *every* article in the sitemap, so nothing gets forgotten
 5. **Broken-link scan** — one article's (or the homepage's) internal links, so dead links get fixed before Google finds them
 6. **Find junk / test articles** — test slugs still live in the sitemap, so you can delete them in the admin panel
@@ -121,7 +121,13 @@ social preview image check: a missing `og:image`, a missing
 does not return 200 (the agent fetches the picture URL — headers only,
 the picture itself is never downloaded). All warnings, not failures —
 the article loads, but its link preview on Facebook, WhatsApp or X
-comes out picture-less or small.
+comes out picture-less or small. And a structured data check: the
+article page should carry JSON-LD with an Article node (Article /
+NewsArticle / BlogPosting — top level or inside an `@graph`) holding
+headline, datePublished, author and image. No JSON-LD, a JSON-LD block
+that does not parse as JSON, no Article node, or a node missing one of
+those four fields is a warning — the article loads and ranks, but
+Google cannot show it as a rich result.
 
 ### Full SEO audit (every article in the sitemap)
 
@@ -147,7 +153,10 @@ these as issues too, so a fixed duplicate shows up as "improved" in
 the next report. The audit also tracks social preview image problems
 (no `og:image`, a broken `og:image` URL, no `og:image:alt`, no
 `twitter:card`) as issues, so a fixed preview shows up as "improved"
-the same way. Exit code is 1 when any article fails (missing title,
+the same way. It also tracks structured data problems (no JSON-LD, a
+broken JSON-LD block, no Article node, or an Article node missing
+headline, datePublished, author or image) as issues, so a fixed
+rich-result setup shows up as "improved" the same way. Exit code is 1 when any article fails (missing title,
 canonical, or a 404), so you can run it in a script. It takes about a
 minute or two (one quick request per article, plus one more per article
 to check its preview picture actually loads).
@@ -178,7 +187,7 @@ python -m zavia_agent.cli --seo-report
 
 One run audits the whole live site (sitemap reachability + URL count,
 duplicate slugs, a sample of URLs for broken links, **every** article
-for title/canonical/meta-description/OG tags/preview image/H1/word count, and the
+for title/canonical/meta-description/OG tags/preview image/H1/word count/structured data, and the
 junk-article finder), then writes a dated report — Markdown + HTML — under
 `reports/` (e.g. `seo-report-2026-11-20-0005.md`) and stores the
 result in `state/last-audit.json` (gitignored) for the next
