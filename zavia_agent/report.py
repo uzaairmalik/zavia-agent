@@ -9,7 +9,8 @@ Mon/Wed/Fri; this module is Zavia's version of it:
 - run_audit(): one audit run. It reuses the checks in seo.py (sitemap
   reachability + URL count, duplicate slugs, a sample of URLs for
   broken links, per-article title/canonical/meta-description/OG/
-  preview-image/H1/word-count/structured-data checks, plus the junk-article finder) and returns one
+  preview-image/H1/word-count/structured-data/title-length/
+  image-alt-text checks, plus the junk-article finder) and returns one
   structured result.
 - compare_reports(previous, current): new vs fixed vs ongoing issues,
   plus per-count deltas labelled better/worse/same.
@@ -40,7 +41,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from .client import ZaviaClient
-from .seo import THIN_CONTENT_WORDS, check_articles, check_sitemap, find_junk_articles
+from .seo import (TITLE_MAX_CHARS, TITLE_MIN_CHARS, THIN_CONTENT_WORDS,
+                  check_articles, check_sitemap, find_junk_articles)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORTS_DIR = os.path.join(REPO_ROOT, "reports")
@@ -60,6 +62,8 @@ LOWER_IS_BETTER = (
     "h1_issues",
     "og_image_issues",
     "structured_data_issues",
+    "title_issues",
+    "image_alt_issues",
     "junk_articles",
     "articles_failed",
     "articles_warned",
@@ -97,7 +101,7 @@ def run_audit(client=None, link_sample=10):
                  articles_failed, articles_warned, broken_links,
                  duplicate_slugs, duplicate_titles,
                  duplicate_descriptions, junk_articles, og_image_issues,
-                 structured_data_issues,
+                 structured_data_issues, title_issues, image_alt_issues,
                  total_issues, fail_issues, warn_issues},
       "issues": [issue dict, ...],   # fails first, then warnings
       "checks": {"sitemap": str, "articles": str, "junk": str},
@@ -213,6 +217,33 @@ def run_audit(client=None, link_sample=10):
                         f"article:{slug}:incomplete-article-schema", "warn", "incomplete-article-schema", slug,
                         f"Article '{slug}' structured data is missing {', '.join(missing_fields)} — Google's article rich result needs these.",
                     ))
+        # Title length (Day 12): Google cuts titles off after about
+        # 60 characters in search results; a title under 30 says
+        # almost nothing about the article. Both are warnings — the
+        # article loads, its title just shows cut off (or says too
+        # little) in search results.
+        title_length = result.get("title_length")
+        if result.get("title_found") and isinstance(title_length, int):
+            if title_length > TITLE_MAX_CHARS:
+                issues.append(_issue(
+                    f"article:{slug}:title-too-long", "warn", "title-too-long", slug,
+                    f"Article '{slug}' has a long title ({title_length} chars) — Google cuts titles off after ~{TITLE_MAX_CHARS}.",
+                ))
+            elif title_length < TITLE_MIN_CHARS:
+                issues.append(_issue(
+                    f"article:{slug}:title-too-short", "warn", "title-too-short", slug,
+                    f"Article '{slug}' has a very short title ({title_length} chars) — aim for {TITLE_MIN_CHARS}-{TITLE_MAX_CHARS}.",
+                ))
+        # Image alt text (Day 12): pictures in the article body with
+        # no alt text. A warning — the article loads, but Google and
+        # screen readers cannot tell what the pictures show.
+        missing_alt = result.get("images_missing_alt")
+        if isinstance(missing_alt, int) and missing_alt > 0:
+            plural = "image" if missing_alt == 1 else "images"
+            issues.append(_issue(
+                f"article:{slug}:missing-image-alt", "warn", "missing-image-alt", slug,
+                f"Article '{slug}' has {missing_alt} {plural} with no alt text — Google and screen readers cannot tell what they show.",
+            ))
         # Content checks (Day 8): H1 count and thin content. Both are
         # warnings — the article loads and ranks, it just ranks worse.
         h1_count = result.get("h1_count")
@@ -285,6 +316,14 @@ def run_audit(client=None, link_sample=10):
                 1 for i in issues
                 if i["kind"] in ("missing-jsonld", "broken-jsonld",
                                  "missing-article-schema", "incomplete-article-schema")
+            ),
+            "title_issues": sum(
+                1 for i in issues
+                if i["kind"] in ("title-too-long", "title-too-short")
+            ),
+            "image_alt_issues": sum(
+                1 for i in issues
+                if i["kind"] == "missing-image-alt"
             ),
             "junk_articles": len(junk["junk"]),
             "total_issues": len(issues),
@@ -413,7 +452,7 @@ def _count_rows(audit):
     return [
         ("URLs in sitemap", counts["total_urls"]),
         ("Article URLs in sitemap", counts["article_urls"]),
-        ("Articles checked (title, canonical, meta description, OG tags, preview image, structured data)", counts["articles_checked"]),
+        ("Articles checked (title, canonical, meta description, OG tags, preview image, structured data, title length, image alt text)", counts["articles_checked"]),
         ("Articles failed (404 / no title / no canonical)", counts["articles_failed"]),
         ("Articles with warnings (missing description, OG tags, or preview image)", counts["articles_warned"]),
         ("Broken links in the sitemap sample", counts["broken_links"]),
@@ -424,6 +463,8 @@ def _count_rows(audit):
         ("Articles with a wrong H1 count (not exactly one)", counts["h1_issues"]),
         ("Social preview image problems (no og:image / broken og:image / no og:image:alt / no twitter:card)", counts["og_image_issues"]),
         ("Structured data problems (no JSON-LD / broken JSON-LD / no Article schema / missing headline, datePublished, author or image)", counts["structured_data_issues"]),
+        ("Title problems (over 60 chars — Google cuts them off — or under 30)", counts["title_issues"]),
+        ("Articles with images missing alt text", counts["image_alt_issues"]),
         ("Junk / test articles still live", counts["junk_articles"]),
         ("Total issues", counts["total_issues"]),
         ("— of which FAIL (must fix)", counts["fail_issues"]),

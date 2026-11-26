@@ -91,11 +91,12 @@ def main():
     # (canonical match + description length, added Day 6), the
     # content fields (H1 count + word count, added Day 8), the
     # preview-image fields (og:image + alt + twitter:card, added
-    # Day 10) and the structured-data fields (JSON-LD + Article
-    # schema, added Day 11). Presence + types only — the exact
+    # Day 10), the structured-data fields (JSON-LD + Article
+    # schema, added Day 11) and the title-length + image alt-text
+    # fields (added Day 12). Presence + types only — the exact
     # H1/word values are live content and change (a real article can
     # legitimately have 2 H1s or a long description; the precise
-    # logic is covered by the offline synthetic tests 8, 9 and 11).
+    # logic is covered by the offline synthetic tests 8, 9, 11 and 12).
     try:
         if not first_slug:
             raise ZaviaError("No article slug from the sitemap to check.")
@@ -110,10 +111,17 @@ def main():
               and one.get("og_image_ok") in (True, False, None)
               and "jsonld_found" in one and "article_schema_found" in one
               and isinstance(one.get("jsonld_blocks"), int)
-              and isinstance(one.get("schema_headline_found"), bool))
+              and isinstance(one.get("schema_headline_found"), bool)
+              and isinstance(one.get("title_length"), int)
+              and (one.get("images_missing_alt") is None
+                   or isinstance(one.get("images_missing_alt"), int))
+              and (one.get("image_count") is None
+                   or isinstance(one.get("image_count"), int)))
         detail = (f"{one['slug']}: canonical_matches={one['canonical_matches']}, "
                   f"description {one['description_length']} chars, "
+                  f"title {one['title_length']} chars, "
                   f"h1_count={one['h1_count']}, word_count={one['word_count']}, "
+                  f"images={one['image_count']} (missing alt: {one['images_missing_alt']}), "
                   f"og_image={'yes' if one['og_image_found'] else 'no'}"
                   f" (loads={one['og_image_ok']}), "
                   f"twitter_card={'yes' if one['twitter_card_found'] else 'no'}, "
@@ -122,7 +130,7 @@ def main():
                   f"{len(one['warnings'])} warning(s)")
     except ZaviaError as exc:
         ok, detail = False, str(exc)
-    results.append(("Single-article check reports canonical + description length + H1/word count + preview image + structured data", ok, detail))
+    results.append(("Single-article check reports canonical + description length + H1/word count + preview image + structured data + title length + image alt text", ok, detail))
 
     # 6. Every module imports (the Day 6 refactor broke cli.py + web.py
     # silently by gutting report.py, and had also deleted this guard —
@@ -172,7 +180,7 @@ def main():
 
             def get_article(self, slug):
                 return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
-                        "status": 200, "title": "Fake Article", "html": self._html}
+                        "status": 200, "title": "Fake Article About Learning Python Fast", "html": self._html}
 
         long_body = "word " * 350
         long_page = ("<html><head><title>Fake Article</title>"
@@ -247,7 +255,7 @@ def main():
 
             def get_article(self, slug):
                 return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
-                        "status": 200, "title": "Fake Article", "html": self._html}
+                        "status": 200, "title": "Fake Article About Learning Python Fast", "html": self._html}
 
         def _img_page(image_url=None, alt=True, card=True):
             head = ("<html><head><title>Fake Article</title>"
@@ -360,7 +368,7 @@ def main():
 
             def get_article(self, slug):
                 return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
-                        "status": 200, "title": "Fake Article", "html": self._html}
+                        "status": 200, "title": "Fake Article About Learning Python Fast", "html": self._html}
 
         def _schema_page(jsonld):
             head = ("<html><head><title>Fake Article</title>"
@@ -408,6 +416,77 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("Structured data (JSON-LD) checks (offline synthetic pages)", ok, detail))
+
+    # 12. Title length + image alt-text checks (offline — synthetic
+    # pages, no network). A title over 60 chars warns that Google
+    # cuts it off; a title under 30 chars warns it is very short; a
+    # 30-60 char title warns about neither. A picture in the article
+    # body with no alt attribute (or an empty one) is counted and
+    # warned about; a page with no <article> tag makes no alt claim
+    # (image_count stays None, no alt warning).
+    try:
+        class _FakeAltClient:
+            def __init__(self, html_text, title):
+                self._html = html_text
+                self._title = title
+
+            def get_article(self, slug):
+                return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
+                        "status": 200, "title": self._title, "html": self._html}
+
+        def _alt_page(title, images):
+            head = ("<html><head><title>" + title + "</title>"
+                    '<link rel="canonical" href="https://zaviamagazine.dev/article/fake">'
+                    '<meta name="description" content="A fine description that is long enough to pass the fifty character minimum.">'
+                    '<meta property="og:title" content="Fake Article">'
+                    '<meta property="og:description" content="A fine description.">'
+                    '<meta property="og:image" content="https://example.com/fake.jpg">'
+                    '<meta property="og:image:alt" content="A fake picture.">'
+                    '<meta name="twitter:card" content="summary_large_image">'
+                    '<script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting",'
+                    '"headline":"Fake Article","datePublished":"2026-11-25T00:00:00Z",'
+                    '"author":{"@type":"Person","name":"Uzair Malik"},'
+                    '"image":"https://example.com/fake.jpg"}</script></head>')
+            body = ("<body><h1>" + title + "</h1><article><p>" + "word " * 350 + "</p>"
+                    + images + "</article></body></html>")
+            return head + body
+
+        good_title = "Fake Article About Learning Python Fast"  # 39 chars
+        long_title = "Fake Article About Learning Python Fast for Students in Pakistan Today"  # 70 chars
+        short_title = "Fake Article"  # 12 chars
+        good = check_article(_FakeAltClient(
+            _alt_page(good_title, '<img src="https://example.com/a.jpg" alt="A picture.">'),
+            good_title), "fake")
+        long_t = check_article(_FakeAltClient(_alt_page(long_title, ""), long_title), "fake")
+        short_t = check_article(_FakeAltClient(_alt_page(short_title, ""), short_title), "fake")
+        bad_alt = check_article(_FakeAltClient(
+            _alt_page(good_title,
+                      '<img src="a.jpg"><img src="b.jpg" alt="">'
+                      '<img src="c.jpg" alt="Described.">'),
+            good_title), "fake")
+        no_tag_page = ("<html><head><title>" + good_title + "</title></head><body><h1>"
+                       + good_title + "</h1>"
+                       '<img src="https://example.com/a.jpg"></body></html>')
+        no_tag = check_article(_FakeAltClient(no_tag_page, good_title), "fake")
+        ok = (good["title_length"] == 39 and good["image_count"] == 1
+              and good["images_missing_alt"] == 0 and not good["warnings"]
+              and long_t["title_length"] == 70
+              and any("title is long (70 chars)" in w for w in long_t["warnings"])
+              and short_t["title_length"] == 12
+              and any("title is very short (12 chars)" in w for w in short_t["warnings"])
+              and bad_alt["image_count"] == 3 and bad_alt["images_missing_alt"] == 2
+              and any("2 images in the article have no alt text" in w for w in bad_alt["warnings"])
+              and no_tag["image_count"] is None and no_tag["images_missing_alt"] is None
+              and not any("alt text" in w for w in no_tag["warnings"]))
+        detail = (f"good: title={good['title_length']} chars, images={good['image_count']}, "
+                  f"missing alt={good['images_missing_alt']}, warnings={len(good['warnings'])}; "
+                  f"long title: {long_t['title_length']} chars, warnings={len(long_t['warnings'])}; "
+                  f"short title: {short_t['title_length']} chars, warnings={len(short_t['warnings'])}; "
+                  f"bad alt: images={bad_alt['image_count']}, missing alt={bad_alt['images_missing_alt']}; "
+                  f"no <article>: images={no_tag['image_count']}")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Title length + image alt-text checks (offline synthetic pages)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

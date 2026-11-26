@@ -27,6 +27,13 @@
   JSON-LD block that does not parse as JSON is broken structured
   data — Google ignores it. Missing or broken structured data is a
   warning, not a failure.
+  And it checks the title length: Google shows about 60 characters
+  of a title in search results, so a longer title gets cut off
+  mid-word, and a very short title (under 30 characters) says almost
+  nothing about the article. And it checks the pictures inside the
+  article body: every <img> should have alt text, so Google and
+  screen readers can tell what the picture shows. Both are warnings,
+  not failures.
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
@@ -73,6 +80,18 @@ TAG_RE = re.compile(r'<[^>]+>')
 THIN_CONTENT_WORDS = 300
 # Meta description + Open Graph tags (Google + social previews use these).
 DESCRIPTION_RE = re.compile(r'<meta[^>]+name=["\']description["\'][^>]*>', re.IGNORECASE)
+# Title length (Day 12): Google shows about 60 characters of a title
+# in search results — longer titles get cut off mid-word. A title
+# under 30 characters says almost nothing about the article.
+TITLE_MIN_CHARS = 30
+TITLE_MAX_CHARS = 60
+# Image alt text (Day 12): the <img> tags inside the article body.
+# An image counts as missing alt text when it has no alt attribute
+# at all, or an empty one (alt="" tells screen readers the picture
+# is decorative — fine for a spacer, but an article picture should
+# be described).
+IMG_RE = re.compile(r'<img\b[^>]*>', re.IGNORECASE)
+IMG_ALT_RE = re.compile(r'\balt\s*=\s*["\']([^"\']*)["\']', re.IGNORECASE)
 OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]*>', re.IGNORECASE)
 OG_DESC_RE = re.compile(r'<meta[^>]+property=["\']og:description["\'][^>]*>', re.IGNORECASE)
 # Social preview image (Day 10): the picture Facebook/WhatsApp/X show
@@ -123,6 +142,26 @@ def _article_word_count(html_text):
 def _h1_count(html_text):
     """How many <h1> headings the page has (a page should have exactly one)."""
     return len(H1_RE.findall(html_text or ""))
+
+
+def _image_alt_stats(html_text):
+    """(images, missing_alt) for the <img> tags in the article body.
+
+    Returns (None, None) when the page has no <article> tag — then no
+    claim is made rather than a wrong one (same rule as the word
+    count). An image counts as missing alt text when it has no alt
+    attribute at all, or an empty one.
+    """
+    match = ARTICLE_RE.search(html_text or "")
+    if not match:
+        return None, None
+    tags = IMG_RE.findall(match.group(1))
+    missing = 0
+    for tag in tags:
+        alt = IMG_ALT_RE.search(tag)
+        if alt is None or not alt.group(1).strip():
+            missing += 1
+    return len(tags), missing
 
 
 def _schema_nodes(data):
@@ -392,10 +431,28 @@ def check_article(client, slug):
     - An Article node missing headline, datePublished, author or
       image — Google's article rich result needs those fields.
 
+    Title length warnings (Day 12) — also warnings, not failures:
+    - A title longer than 60 characters — Google cuts titles off
+      after about 60 characters in search results, so the end of
+      the title never shows.
+    - A title shorter than 30 characters — it says almost nothing
+      about what the article is.
+    Length is counted after unescaping HTML entities, the same as
+    the meta description length.
+
+    Image alt-text warnings (Day 12) — also warnings, not failures:
+    - A picture inside the article body with no alt text (or an
+      empty alt attribute) — Google and screen readers cannot tell
+      what the picture shows. When the page has no <article> tag
+      the pictures cannot be measured, so no warning is given.
+
     Returns a dict:
     {
       "slug": str, "url": str, "status": int|None,
       "title": str, "title_found": bool,
+      "title_length": int,   # chars, after unescaping entities (0 when no title)
+      "image_count": int|None,   # <img> tags in the <article> body (None when no <article> tag)
+      "images_missing_alt": int|None,   # of those, how many have no (or empty) alt text
       "canonical": str|None, "canonical_found": bool,
       "canonical_matches": bool,   # canonical path == this article's path
       "canonical_host_ok": bool,   # canonical host is a Zavia host
@@ -503,6 +560,11 @@ def check_article(client, slug):
     h1_count = _h1_count(html_text)
     word_count = _article_word_count(html_text)
     schema = _structured_data(html_text)
+    # Title length (Day 12): counted after unescaping entities, so
+    # &#x27; counts as one character, not six — same as the meta
+    # description length. 0 when there is no title to measure.
+    title_length = len(html.unescape(info.get("title") or "")) if title_found else 0
+    image_count, images_missing_alt = _image_alt_stats(html_text)
     warnings = []
     if info["status"] == 200:
         if canonical is not None:
@@ -516,6 +578,13 @@ def check_article(client, slug):
             warnings.append(f"meta description is very short ({description_length} chars) — aim for 50-160")
         elif description_length > 160:
             warnings.append(f"meta description is long ({description_length} chars) — Google truncates it after ~160")
+        # Title length (Day 12): Google shows about 60 characters of
+        # a title in search results; a longer title gets cut off.
+        if title_found:
+            if title_length > TITLE_MAX_CHARS:
+                warnings.append(f"title is long ({title_length} chars) — Google cuts titles off after ~{TITLE_MAX_CHARS}")
+            elif title_length < TITLE_MIN_CHARS:
+                warnings.append(f"title is very short ({title_length} chars) — aim for {TITLE_MIN_CHARS}-{TITLE_MAX_CHARS}")
         if not og_title_found or not og_description_found:
             warnings.append("missing Open Graph tags (link previews on Facebook/WhatsApp will look plain)")
         if not og_image_found:
@@ -531,6 +600,12 @@ def check_article(client, slug):
             warnings.append("no og:image:alt (screen readers cannot describe the preview picture)")
         if not twitter_card_found:
             warnings.append("no twitter:card (X link previews fall back to a small summary card)")
+        # Image alt text (Day 12): pictures in the article body with
+        # no alt text. image_count is None when the page has no
+        # <article> tag — then nothing is claimed, so no warning.
+        if image_count is not None and images_missing_alt:
+            plural = "image" if images_missing_alt == 1 else "images"
+            warnings.append(f"{images_missing_alt} {plural} in the article have no alt text — Google and screen readers cannot tell what they show")
         if h1_count == 0:
             warnings.append("no <h1> heading — Google uses the H1 to understand what the page is about")
         elif h1_count > 1:
@@ -574,6 +649,9 @@ def check_article(client, slug):
         "status": info["status"],
         "title": info.get("title", ""),
         "title_found": title_found,
+        "title_length": title_length,
+        "image_count": image_count,
+        "images_missing_alt": images_missing_alt,
         "canonical": canonical,
         "canonical_found": canonical is not None,
         "canonical_matches": canonical_matches,
@@ -669,7 +747,9 @@ def _failed_result(slug, exc):
     """A check_article-shaped dict for an article that could not be checked."""
     return {
         "slug": slug, "url": "", "status": None, "title": "",
-        "title_found": False, "canonical": None,
+        "title_found": False, "title_length": 0,
+        "image_count": None, "images_missing_alt": None,
+        "canonical": None,
         "canonical_found": False, "canonical_matches": False,
         "canonical_host_ok": True, "description": "",
         "description_full": "",
