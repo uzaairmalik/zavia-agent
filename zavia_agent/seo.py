@@ -44,6 +44,11 @@
 - check_links(slug=None): fetch one article page (or the homepage when
   no slug is given), find its internal links, and report any that
   return a non-200 status — broken internal links hurt SEO.
+- check_crawl_files(): fetch /robots.txt and /llms.txt — the two files
+  crawlers read before anything else. A robots.txt that Disallows /
+  for every crawler would stop Google crawling the whole site, so
+  that is a failure; a missing robots.txt, a robots.txt with no
+  Sitemap line, or a missing llms.txt are warnings.
 
 Nothing here needs a token — these are plain public-page checks.
 """
@@ -1083,4 +1088,178 @@ def check_links(client=None, slug=None, max_links=60, timeout=10):
         "page_url": page_url, "page_status": page_status, "links": links,
         "broken": broken, "checked": len(links), "skipped": skipped,
         "ok": ok, "summary": "; ".join(parts) + ".",
+    }
+
+
+# ---------------------------------------------------------------- crawl files
+# (Day 13): /robots.txt and /llms.txt — the two files crawlers read
+# before anything else. A robots.txt that Disallows / for every
+# crawler would stop Google crawling the whole site, so that is a
+# failure, not a warning. Everything else here is a warning: the
+# site still loads and ranks, it just tells crawlers less than it
+# should.
+ROBOTS_PATH = "/robots.txt"
+LLMS_PATH = "/llms.txt"
+
+
+def _parse_robots(text):
+    """Read a robots.txt file.
+
+    Returns a dict:
+    {
+      "sitemap_urls": [str, ...],   # every Sitemap: line, as written
+      "blocks_all": bool,           # the User-agent: * block Disallows /
+      "disallowed": [str, ...],     # Disallow paths in the * block
+    }
+    Only the User-agent: * block matters here — it applies to every
+    crawler, including Googlebot. A bare "Disallow: /" (or "Disallow:
+    /*") in that block blocks the whole site. An empty "Disallow:"
+    means "allow everything" and is fine. Lines after a # are
+    comments; field names are case-insensitive; Sitemap: lines are
+    global (they belong to no group).
+    """
+    sitemap_urls = []
+    disallowed = []
+    blocks_all = False
+    current_agents = []  # user-agents of the group being read
+    # True once the current group has seen a rule (or a Sitemap line):
+    # the next User-agent line then starts a NEW group. Two
+    # User-agent lines in a row belong to the SAME group (the second
+    # one just adds an agent), so they must not reset the group.
+    group_open = False
+    for raw_line in (text or "").splitlines():
+        # A # starts a comment — everything after it is ignored.
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        field, _, value = line.partition(":")
+        field = field.strip().lower()
+        value = value.strip()
+        if field == "user-agent":
+            if group_open:
+                current_agents = [value.lower()]
+                group_open = False
+            else:
+                current_agents.append(value.lower())
+        elif field == "disallow":
+            group_open = True
+            if "*" in current_agents:
+                disallowed.append(value)
+                if value in ("/", "/*"):
+                    blocks_all = True
+        elif field == "sitemap":
+            # Global — belongs to no group — but it still closes the
+            # run of User-agent lines, so a group after it is new.
+            group_open = True
+            if value:
+                sitemap_urls.append(value)
+        elif field in ("allow", "crawl-delay", "noindex"):
+            # Any other rule line also closes the User-agent run.
+            group_open = True
+    return {"sitemap_urls": sitemap_urls, "blocks_all": blocks_all, "disallowed": disallowed}
+
+
+def check_crawl_files(client=None, timeout=10):
+    """Check /robots.txt and /llms.txt on the live site.
+
+    - /robots.txt must return 200. It must name the sitemap (a
+      Sitemap: line pointing at a Zavia host), and it must NOT
+      Disallow / for every crawler — that would stop Google crawling
+      the whole site. A missing or unreachable robots.txt, or one
+      that blocks everything, is a failure (exit 1).
+    - /llms.txt must return 200. AI crawlers (ChatGPT, Claude, ...)
+      read it to learn what the site covers — the 22 Nov SEO roast
+      found it missing, so it is worth checking it stays live. A
+      missing llms.txt is a warning, not a failure: Google does not
+      need it.
+
+    A 5xx here can be a temporary database drop rather than a real
+    problem — if both files fail at once, wait a few minutes and run
+    it again before treating them as broken.
+
+    Returns a dict:
+    {
+      "robots_status": int|None, "robots_found": bool,
+      "robots_has_sitemap": bool,   # a Sitemap: line naming a Zavia host
+      "robots_sitemap_url": str|None,   # the first Sitemap: line, if any
+      "robots_blocks_all": bool,    # User-agent: * Disallows /
+      "robots_disallowed": [str, ...],   # Disallow paths in the * block
+      "llms_status": int|None, "llms_found": bool,
+      "failures": [str, ...],   # missing/unreachable robots.txt, blocks-all
+      "warnings": [str, ...],   # no Sitemap line, sitemap host, missing llms.txt
+      "ok": bool,   # True only when there are no failures
+      "summary": str,
+    }
+    """
+    client = client or ZaviaClient()
+    failures = []
+    warnings = []
+
+    def _fetch(path):
+        # Plain session GET (no client retries — a file that needs
+        # three attempts is slow enough to count as broken, and a
+        # retry would hide a flapping database).
+        url = client.base_url + path
+        try:
+            resp = client.session.get(url, timeout=timeout)
+            return resp.status_code, resp.text, None
+        except Exception as exc:  # network error, timeout, DNS, ...
+            return None, None, str(exc)[:120]
+
+    robots_status, robots_text, robots_error = _fetch(ROBOTS_PATH)
+    robots_found = robots_status == 200
+    robots = _parse_robots(robots_text) if robots_found else {"sitemap_urls": [], "blocks_all": False, "disallowed": []}
+    robots_sitemap_url = robots["sitemap_urls"][0] if robots["sitemap_urls"] else None
+    robots_has_sitemap = False
+    if robots_sitemap_url:
+        parsed_sitemap = urlparse(robots_sitemap_url)
+        robots_has_sitemap = (
+            parsed_sitemap.path.rstrip("/").endswith("/sitemap.xml")
+            and (not parsed_sitemap.netloc or parsed_sitemap.netloc in INTERNAL_HOSTS)
+        )
+    if robots_status is None:
+        failures.append(f"robots.txt could not be checked ({robots_error}) — could not confirm crawlers can read it")
+    elif robots_status != 200:
+        failures.append(f"robots.txt returned HTTP {robots_status} — crawlers cannot read it (Google assumes everything is allowed, but add the file so it finds the sitemap)")
+    else:
+        if robots["blocks_all"]:
+            failures.append("robots.txt Disallows / for every crawler — Google would stop crawling the whole site")
+        if not robots["sitemap_urls"]:
+            warnings.append("robots.txt has no Sitemap: line — Google has to find the sitemap on its own")
+        elif not robots_has_sitemap:
+            warnings.append(f"robots.txt names a sitemap that is not Zavia's ({robots_sitemap_url}) — it should point at zaviamagazine.dev/sitemap.xml")
+
+    llms_status, _llms_text, llms_error = _fetch(LLMS_PATH)
+    llms_found = llms_status == 200
+    if llms_status is None:
+        warnings.append(f"llms.txt could not be checked ({llms_error}) — could not confirm AI crawlers can read it")
+    elif llms_status != 200:
+        warnings.append(f"llms.txt returned HTTP {llms_status} — AI crawlers (ChatGPT, Claude, ...) cannot read what the site covers")
+
+    ok = not failures
+    parts = []
+    if robots_found:
+        parts.append("robots.txt OK" if not failures else "robots.txt has problems")
+        if robots_has_sitemap:
+            parts.append("it names the sitemap")
+    else:
+        parts.append("robots.txt missing" if robots_status == 404 else "robots.txt could not be checked")
+    parts.append("llms.txt OK" if llms_found else "llms.txt missing")
+    if failures:
+        parts.append("FAIL: " + "; ".join(failures))
+    if warnings:
+        parts.append("Warning: " + "; ".join(warnings))
+    return {
+        "robots_status": robots_status,
+        "robots_found": robots_found,
+        "robots_has_sitemap": robots_has_sitemap,
+        "robots_sitemap_url": robots_sitemap_url,
+        "robots_blocks_all": robots["blocks_all"],
+        "robots_disallowed": robots["disallowed"],
+        "llms_status": llms_status,
+        "llms_found": llms_found,
+        "failures": failures,
+        "warnings": warnings,
+        "ok": ok,
+        "summary": "; ".join(parts) + ".",
     }

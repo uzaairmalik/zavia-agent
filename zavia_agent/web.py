@@ -19,7 +19,7 @@ from flask import Flask, abort, render_template_string, request, send_from_direc
 from .client import ZaviaClient, ZaviaError
 from .health import check_site
 from .report import REPORTS_DIR, latest_report_info, list_reports
-from .seo import check_sitemap, check_sitemap_live
+from .seo import check_crawl_files, check_sitemap, check_sitemap_live
 
 app = Flask(__name__)
 
@@ -87,6 +87,9 @@ PAGE = """<!doctype html>
 <form method="post" action="/sitemap-check"><button type="submit">Check every sitemap URL (find dead pages)</button></form>
 <p class="note">Fetches all ~170 URLs in the sitemap and lists the ones that do not return 200 — the dead pages Google still sends clicks to. Takes a minute or so.</p>
 {% if sitemap_msg %}<p class="msg">{{ sitemap_msg }}</p>{% endif %}
+<form method="post" action="/crawl-check"><button type="submit">Check the crawl files (robots.txt + llms.txt)</button></form>
+<p class="note">The files crawlers read before anything else — a robots.txt that blocks everything would stop Google crawling the whole site.</p>
+{% if crawl_msg %}<p class="msg">{{ crawl_msg }}</p>{% endif %}
 </div>
 
 <div class="card">
@@ -166,7 +169,7 @@ def home():
     return render_template_string(
         PAGE, health=health, health_error=health_error,
         article_count=article_count, token_set=bool(client.token),
-        publish_msg="", seo_msg="", sitemap_msg="", reports=latest_report_info(),
+        publish_msg="", seo_msg="", sitemap_msg="", crawl_msg="", reports=latest_report_info(),
     )
 
 
@@ -223,7 +226,7 @@ def publish():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg=msg, seo_msg="",
-        sitemap_msg="", reports=latest_report_info(),
+        sitemap_msg="", crawl_msg="", reports=latest_report_info(),
     )
 
 
@@ -251,7 +254,7 @@ def seo():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg="", seo_msg=msg,
-        sitemap_msg="", reports=latest_report_info(),
+        sitemap_msg="", crawl_msg="", reports=latest_report_info(),
     )
 
 
@@ -284,7 +287,41 @@ def sitemap_check():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg="", seo_msg="",
-        sitemap_msg=msg, reports=latest_report_info(),
+        sitemap_msg=msg, crawl_msg="", reports=latest_report_info(),
+    )
+
+
+@app.route("/crawl-check", methods=["POST"])
+def crawl_check():
+    """Check /robots.txt and /llms.txt — the files crawlers read first."""
+    client = _client()
+    try:
+        report = check_crawl_files(client)
+        lines = [report["summary"]]
+        if report["failures"]:
+            lines.append("Failures (fix these — crawlers cannot read the site properly):")
+            lines.extend("  - " + item for item in report["failures"])
+        if report["warnings"]:
+            lines.append("Warnings:")
+            lines.extend("  - " + item for item in report["warnings"])
+        if report["robots_blocks_all"]:
+            lines.append("Note: a robots.txt that Disallows / for every crawler stops "
+                         "Google crawling the whole site. Remove that line (or narrow "
+                         "it to one path, e.g. Disallow: /admin/) and re-run this check.")
+        msg = "\n".join(lines)
+    except ZaviaError as exc:
+        msg = "Crawl-files check failed:\n" + str(exc)
+    except Exception as exc:
+        msg = f"Unexpected error ({type(exc).__name__}): {exc}"
+    try:
+        health = check_site(client, retries=1, delay=0)
+        article_count = health["sitemap"].get("count")
+    except Exception:
+        health, article_count = None, None
+    return render_template_string(
+        PAGE, health=health, health_error="", article_count=article_count,
+        token_set=bool(client.token), publish_msg="", seo_msg="",
+        sitemap_msg="", crawl_msg=msg, reports=latest_report_info(),
     )
 
 

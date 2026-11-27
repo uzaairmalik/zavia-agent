@@ -3,7 +3,7 @@
 A small, friendly, ready-to-use agent for the **Zavia blog**
 ([zaviamagazine.dev](https://zaviamagazine.dev)).
 
-It does nine useful jobs, and nothing else:
+It does ten useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
@@ -14,6 +14,7 @@ It does nine useful jobs, and nothing else:
 7. **Save an SEO report** — a bulk check or full audit saved as a dated Markdown file, so you have a record to look back at
 8. **Web dashboard** — the same jobs in your browser
 9. **Sitemap liveness check** — every URL in the sitemap fetched, so dead pages (articles lost from the database that Google still links to) get found in one run
+10. **Crawl-files check** — `/robots.txt` and `/llms.txt`, the files crawlers read before anything else: a robots.txt that blocks every crawler would stop Google crawling the whole site, so that is a failure; a missing robots.txt, a robots.txt with no Sitemap line, or a missing llms.txt are warnings
 
 Built for Uzair (BCS student, Pakistan). Simple English, a little Roman
 Urdu where natural, and it never crashes on a bad input — it explains
@@ -65,6 +66,7 @@ python -m zavia_agent.cli
  11  Full SEO audit + save report to a file
  12  SEO audit report (full audit + dated report, compared with last run)
  13  Sitemap liveness check (every URL in the sitemap — find dead pages)
+ 14  Crawl-files check (/robots.txt + /llms.txt — what crawlers read first)
   0  Exit
 =============================================
 ```
@@ -83,6 +85,7 @@ python -m zavia_agent.cli --seo --articles slug-one,slug-two --report my-report.
 python -m zavia_agent.cli --links my-article-slug
 python -m zavia_agent.cli --links   # scan the homepage's links
 python -m zavia_agent.cli --sitemap-check   # every URL in the sitemap, find the dead ones
+python -m zavia_agent.cli --crawl-check   # /robots.txt + /llms.txt, the files crawlers read first
 python -m zavia_agent.cli --junk
 python -m zavia_agent.cli --list
 python -m zavia_agent.cli --publish examples/sample-article.md
@@ -256,6 +259,38 @@ pages fail at once with 500/502/503, the database is probably having
 one of its short drops — wait a few minutes and run it again before
 treating those pages as dead. The dashboard has the same check as a
 button in its SEO card.
+
+### Crawl-files check (/robots.txt + /llms.txt)
+
+```bash
+python -m zavia_agent.cli --crawl-check
+# Checking the crawl files (/robots.txt and /llms.txt)...
+#
+# robots.txt OK; it names the sitemap; llms.txt OK.
+```
+
+`/robots.txt` and `/llms.txt` are the two files crawlers read before
+anything else on the site — Google reads robots.txt to learn where the
+sitemap is and what it may crawl, and AI crawlers (ChatGPT, Claude,
+...) read llms.txt to learn what the site covers. This check fetches
+both and reports:
+
+- **Failure** (exit code 1): robots.txt is missing or cannot be
+  fetched, or — the dangerous one — it `Disallow`s `/` for every
+  crawler (`User-agent: *`), which would stop Google crawling the
+  whole site. A `Disallow: /` under one named crawler only (e.g.
+  Googlebot) is *not* flagged — it only blocks that crawler.
+- **Warning**: robots.txt has no `Sitemap:` line, or names a sitemap
+  that is not Zavia's (it should point at
+  zaviamagazine.dev/sitemap.xml), or llms.txt is missing or cannot be
+  fetched. The 22 Nov SEO roast found llms.txt missing, so it is
+  worth checking it stays live.
+
+Fix a blocking robots.txt by removing the `Disallow: /` line (or
+narrowing it to one path, e.g. `Disallow: /admin/`). One caution: a
+5xx on both files at once probably means the database is having one
+of its short drops — wait a few minutes and run it again. The
+dashboard has the same check as a button in its SEO card.
 
 ### Web dashboard
 

@@ -14,6 +14,7 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --links my-article-slug
     python -m zavia_agent.cli --links   (scan the homepage's links)
     python -m zavia_agent.cli --sitemap-check
+    python -m zavia_agent.cli --crawl-check
     python -m zavia_agent.cli --list
     python -m zavia_agent.cli --publish examples/sample-article.md
     python -m zavia_agent.cli --update update.json
@@ -32,9 +33,9 @@ from .client import ZaviaClient, ZaviaError, load_dotenv
 from .health import check_site
 from .report import (compare_reports, default_report_path, load_previous_state,
                      run_audit, write_report, write_seo_report)
-from .seo import (check_article, check_articles, check_links,
-                   check_sitemap, check_sitemap_live, check_sitemap_seo,
-                   find_junk_articles)
+from .seo import (check_article, check_articles, check_crawl_files,
+                   check_links, check_sitemap, check_sitemap_live,
+                   check_sitemap_seo, find_junk_articles)
 
 
 # ---------------------------------------------------------------- front-matter
@@ -291,6 +292,30 @@ def do_links(client, slug=None):
     return report
 
 
+def do_crawl_files(client):
+    """Check /robots.txt and /llms.txt; print each failure and warning.
+
+    Returns the report dict (so --crawl-check can exit non-zero when
+    robots.txt is missing, unreachable, or blocks all crawlers).
+    """
+    print("\nChecking the crawl files (/robots.txt and /llms.txt) — the files crawlers read before anything else...")
+    report = check_crawl_files(client)
+    print("\n" + report["summary"])
+    if report["failures"]:
+        print("Failures (fix these — crawlers cannot read the site properly):")
+        for item in report["failures"]:
+            print("  - " + item)
+    if report["warnings"]:
+        print("Warnings:")
+        for item in report["warnings"]:
+            print("  - " + item)
+    if report["robots_blocks_all"]:
+        print("\nNote: a robots.txt that Disallows / for every crawler stops "
+              "Google crawling the whole site. Remove that line (or narrow "
+              "it to one path, e.g. Disallow: /admin/) and re-run this check.")
+    return report
+
+
 def do_config(client):
     print("\nConfig / status")
     print(f"  Site (base URL): {client.base_url}")
@@ -360,6 +385,7 @@ MENU = """
  11  Full SEO audit + save report to a file
  12  SEO audit report (full audit + dated report, compared with last run)
  13  Sitemap liveness check (every URL in the sitemap — find dead pages)
+ 14  Crawl-files check (/robots.txt + /llms.txt — what crawlers read first)
   0  Exit
 =============================================
 """
@@ -417,8 +443,10 @@ def interactive(client):
                 do_seo_report(client)
             elif choice == "13":
                 do_sitemap_check(client)
+            elif choice == "14":
+                do_crawl_files(client)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-13.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-14.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -452,6 +480,8 @@ def main(argv=None):
                         help="Full SEO audit + dated report under reports/, compared with the previous run (Lesson 14 pattern), and exit.")
     parser.add_argument("--sitemap-check", action="store_true",
                         help="Check EVERY URL in the sitemap and list the dead ones (not just a 10-URL sample) and exit.")
+    parser.add_argument("--crawl-check", action="store_true",
+                        help="Check /robots.txt and /llms.txt (the files crawlers read first) and exit.")
     args = parser.parse_args(argv)
 
     client = ZaviaClient()
@@ -467,6 +497,9 @@ def main(argv=None):
             return 0 if audit["ok"] else 1
         if args.sitemap_check:
             report = do_sitemap_check(client)
+            return 0 if report["ok"] else 1
+        if args.crawl_check:
+            report = do_crawl_files(client)
             return 0 if report["ok"] else 1
         if args.seo:
             if args.all:

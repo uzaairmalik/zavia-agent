@@ -18,7 +18,8 @@ sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 
 from zavia_agent.client import ZaviaClient, ZaviaError
 from zavia_agent.report import write_seo_report
-from zavia_agent.seo import (_article_word_count, _h1_count, check_article,
+from zavia_agent.seo import (_article_word_count, _h1_count, _parse_robots,
+                             check_article, check_crawl_files,
                              check_sitemap_live, check_sitemap_seo,
                              find_duplicate_meta)
 
@@ -487,6 +488,94 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("Title length + image alt-text checks (offline synthetic pages)", ok, detail))
+
+    # 13. Crawl-files check (offline — fake client, no network).
+    # A good robots.txt (Sitemap line naming Zavia, no Disallow: /)
+    # plus a live llms.txt is OK with no failures or warnings; a
+    # robots.txt that Disallows / for every crawler is a failure
+    # (blocks_all) — but the same Disallow under a Googlebot-only
+    # group is NOT; a missing robots.txt is a failure and a missing
+    # llms.txt is only a warning; a robots.txt with no Sitemap line
+    # warns; an unreachable robots.txt (request error) is a failure
+    # that says it could not be checked. Two User-agent lines in a
+    # row are one group, so a Disallow after both still counts.
+    try:
+        class _FakeTextResp:
+            def __init__(self, status, text=""):
+                self.status_code = status
+                self.text = text
+
+        class _FakeTextSession:
+            def __init__(self, answers):
+                self._answers = answers
+
+            def get(self, url, timeout=None):
+                answer = self._answers.get(url)
+                if isinstance(answer, Exception):
+                    raise answer
+                status, text = answer
+                return _FakeTextResp(status, text)
+
+        class _FakeCrawlClient:
+            def __init__(self, answers):
+                self.base_url = "https://zaviamagazine.dev"
+                self.session = _FakeTextSession(answers)
+
+        good_robots = ("User-agent: *\nDisallow: /api/\nDisallow: /admin/\n"
+                       "Sitemap: https://zaviamagazine.dev/sitemap.xml\n")
+        blocked_robots = ("User-agent: *\nDisallow: /\n"
+                          "Sitemap: https://zaviamagazine.dev/sitemap.xml\n")
+        google_only_robots = ("User-agent: Googlebot\nDisallow: /\n"
+                              "User-agent: *\nDisallow: /api/\n"
+                              "Sitemap: https://zaviamagazine.dev/sitemap.xml\n")
+        two_agent_robots = ("User-agent: *\nUser-agent: Bingbot\nDisallow: /\n"
+                            "Sitemap: https://zaviamagazine.dev/sitemap.xml\n")
+        no_sitemap_robots = "User-agent: *\nDisallow: /api/\n"
+        base = "https://zaviamagazine.dev"
+        good = check_crawl_files(_FakeCrawlClient(
+            {base + "/robots.txt": (200, good_robots), base + "/llms.txt": (200, "# Zavia\n")}))
+        blocked = check_crawl_files(_FakeCrawlClient(
+            {base + "/robots.txt": (200, blocked_robots), base + "/llms.txt": (200, "# Zavia\n")}))
+        google_only = check_crawl_files(_FakeCrawlClient(
+            {base + "/robots.txt": (200, google_only_robots), base + "/llms.txt": (200, "# Zavia\n")}))
+        two_agent = check_crawl_files(_FakeCrawlClient(
+            {base + "/robots.txt": (200, two_agent_robots), base + "/llms.txt": (200, "# Zavia\n")}))
+        missing = check_crawl_files(_FakeCrawlClient(
+            {base + "/robots.txt": (404, ""), base + "/llms.txt": (404, "")}))
+        no_sitemap = check_crawl_files(_FakeCrawlClient(
+            {base + "/robots.txt": (200, no_sitemap_robots), base + "/llms.txt": (200, "# Zavia\n")}))
+        unreachable = check_crawl_files(_FakeCrawlClient(
+            {base + "/robots.txt": ConnectionError("boom"), base + "/llms.txt": (200, "# Zavia\n")}))
+        parsed = _parse_robots("User-agent: * # a comment\nDisallow: /api/\n"
+                               "Sitemap: https://zaviamagazine.dev/sitemap.xml\n")
+        ok = (good["ok"] and good["robots_found"] and good["robots_has_sitemap"]
+              and good["robots_sitemap_url"] == "https://zaviamagazine.dev/sitemap.xml"
+              and not good["robots_blocks_all"] and good["llms_found"]
+              and not good["failures"] and not good["warnings"]
+              and not blocked["ok"] and blocked["robots_blocks_all"]
+              and any("Disallows /" in f for f in blocked["failures"])
+              and google_only["ok"] and not google_only["robots_blocks_all"]
+              and not two_agent["ok"] and two_agent["robots_blocks_all"]
+              and not missing["ok"] and not missing["robots_found"]
+              and any("robots.txt returned HTTP 404" in f for f in missing["failures"])
+              and not missing["llms_found"]
+              and any("llms.txt returned HTTP 404" in w for w in missing["warnings"])
+              and no_sitemap["ok"] and not no_sitemap["robots_has_sitemap"]
+              and any("no Sitemap: line" in w for w in no_sitemap["warnings"])
+              and not unreachable["ok"]
+              and any("could not be checked" in f for f in unreachable["failures"])
+              and parsed["sitemap_urls"] == ["https://zaviamagazine.dev/sitemap.xml"]
+              and parsed["disallowed"] == ["/api/"] and not parsed["blocks_all"])
+        detail = (f"good: ok={good['ok']}, failures={len(good['failures'])}, warnings={len(good['warnings'])}; "
+                  f"blocked: ok={blocked['ok']}, blocks_all={blocked['robots_blocks_all']}; "
+                  f"google-only: ok={google_only['ok']}, blocks_all={google_only['robots_blocks_all']}; "
+                  f"two-agent: blocks_all={two_agent['robots_blocks_all']}; "
+                  f"missing: ok={missing['ok']}, failures={len(missing['failures'])}, warnings={len(missing['warnings'])}; "
+                  f"no sitemap line: warnings={len(no_sitemap['warnings'])}; "
+                  f"unreachable: ok={unreachable['ok']}")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Crawl-files check (offline fake robots.txt / llms.txt)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)
