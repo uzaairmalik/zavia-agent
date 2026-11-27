@@ -32,8 +32,11 @@
   mid-word, and a very short title (under 30 characters) says almost
   nothing about the article. And it checks the pictures inside the
   article body: every <img> should have alt text, so Google and
-  screen readers can tell what the picture shows. Both are warnings,
-  not failures.
+  screen readers can tell what the picture shows — and every picture's
+  URL is actually fetched, because a picture that 404s shows readers
+  a broken image. A picture whose fetch fails outright (timeout, DNS,
+  ...) is "could not be checked", not broken — the same rule as the
+  og:image check. Both are warnings, not failures.
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
@@ -97,6 +100,11 @@ TITLE_MAX_CHARS = 60
 # be described).
 IMG_RE = re.compile(r'<img\b[^>]*>', re.IGNORECASE)
 IMG_ALT_RE = re.compile(r'\balt\s*=\s*["\']([^"\']*)["\']', re.IGNORECASE)
+IMG_SRC_RE = re.compile(r'\bsrc\s*=\s*["\']([^"\']*)["\']', re.IGNORECASE)
+# Broken in-body images (Day 14): at most this many pictures per
+# article are fetched — a picture-heavy article stays quick, and the
+# rest are reported as skipped rather than silently ignored.
+MAX_BODY_IMAGES = 10
 OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]*>', re.IGNORECASE)
 OG_DESC_RE = re.compile(r'<meta[^>]+property=["\']og:description["\'][^>]*>', re.IGNORECASE)
 # Social preview image (Day 10): the picture Facebook/WhatsApp/X show
@@ -167,6 +175,69 @@ def _image_alt_stats(html_text):
         if alt is None or not alt.group(1).strip():
             missing += 1
     return len(tags), missing
+
+
+def _image_srcs(html_text, page_url):
+    """Unique picture URLs inside the article body.
+
+    Returns a list of absolute URLs (a relative src is resolved
+    against the article's own URL), in the order they first appear.
+    data: URIs (embedded pictures) and empty srcs are skipped — they
+    are not links to fetch, so they cannot be broken. Returns [] when
+    the page has no <article> tag (same rule as the word count).
+    """
+    match = ARTICLE_RE.search(html_text or "")
+    if not match:
+        return []
+    seen = []
+    seen_set = set()
+    for tag in IMG_RE.findall(match.group(1)):
+        src = IMG_SRC_RE.search(tag)
+        if src is None:
+            continue
+        # HTML entities in the attribute value (e.g. &amp; in a
+        # Next.js /_next/image?url=...&w=...&q=... URL) must be
+        # unescaped first — a browser decodes them before fetching,
+        # and fetching the raw text returns HTTP 400 (a false
+        # "broken" flag — caught live on Day 14).
+        value = html.unescape((src.group(1) or "").strip())
+        if not value or value.startswith("data:"):
+            continue
+        absolute = urljoin(page_url, value)
+        if absolute not in seen_set:
+            seen_set.add(absolute)
+            seen.append(absolute)
+    return seen
+
+
+def _check_image_urls(session, urls, timeout=10):
+    """Fetch picture URLs (headers only) and sort them into broken / unchecked.
+
+    A non-200 status is broken — the picture is gone, so readers see
+    a broken image. A fetch that fails outright (timeout, DNS, ...) is
+    unchecked — unknown, not broken (the same rule as the og:image
+    check, so a slow picture host does not cry wolf).
+
+    Returns (broken, unchecked) — each a list of dicts:
+    broken:    [{"url": str, "status": int}, ...]
+    unchecked: [{"url": str, "error": str}, ...]
+    """
+    broken = []
+    unchecked = []
+    for url in urls:
+        try:
+            # stream=True: only the headers are read — the picture
+            # itself is never downloaded, this is just a liveness
+            # check, and the response is closed straight away.
+            resp = session.get(url, timeout=timeout, stream=True)
+            try:
+                if resp.status_code != 200:
+                    broken.append({"url": url, "status": resp.status_code})
+            finally:
+                resp.close()
+        except Exception as exc:  # network error, timeout, DNS, ...
+            unchecked.append({"url": url, "error": str(exc)[:120]})
+    return broken, unchecked
 
 
 def _schema_nodes(data):
@@ -451,6 +522,19 @@ def check_article(client, slug):
       what the picture shows. When the page has no <article> tag
       the pictures cannot be measured, so no warning is given.
 
+    Broken in-body images (Day 14) — also warnings, not failures:
+    - A picture inside the article body whose URL does not load
+      (a non-200 status) — readers see a broken image, and a page
+      full of broken pictures looks abandoned. The agent fetches
+      each picture's URL (headers only, the picture itself is never
+      downloaded), at most 10 pictures per article — the rest are
+      reported as skipped, not silently ignored.
+    - A picture whose URL could not be fetched at all (timeout, DNS,
+      ...) is "could not be checked", not broken — a slow picture
+      host is not a broken picture. A fake/test client with no
+      session cannot fetch pictures at all, so no claim is made
+      either way and no warning is given.
+
     Returns a dict:
     {
       "slug": str, "url": str, "status": int|None,
@@ -458,6 +542,10 @@ def check_article(client, slug):
       "title_length": int,   # chars, after unescaping entities (0 when no title)
       "image_count": int|None,   # <img> tags in the <article> body (None when no <article> tag)
       "images_missing_alt": int|None,   # of those, how many have no (or empty) alt text
+      "image_broken": [{"url": str, "status": int}, ...],   # body pictures that do not load
+      "image_unchecked": [{"url": str, "error": str}, ...],   # body pictures whose fetch failed (unknown, not broken)
+      "images_checked": int,   # body pictures actually fetched (0 when no session or no <article> tag)
+      "images_skipped": int,   # body pictures over the MAX_BODY_IMAGES cap (not fetched)
       "canonical": str|None, "canonical_found": bool,
       "canonical_matches": bool,   # canonical path == this article's path
       "canonical_host_ok": bool,   # canonical host is a Zavia host
@@ -542,7 +630,9 @@ def check_article(client, slug):
         # None and no warning is given). A real client always has one.
         session = getattr(client, "session", None)
         if session is not None:
-            image_url = urljoin(info["url"], og_image)
+            # Unescape entities first (see _image_srcs): an og:image URL
+            # with &amp; in it fetches as HTTP 400 when taken raw.
+            image_url = urljoin(info["url"], html.unescape(og_image))
             try:
                 # stream=True: only the headers are read — the picture
                 # itself is never downloaded, this is just a liveness
@@ -570,6 +660,20 @@ def check_article(client, slug):
     # description length. 0 when there is no title to measure.
     title_length = len(html.unescape(info.get("title") or "")) if title_found else 0
     image_count, images_missing_alt = _image_alt_stats(html_text)
+    # Broken in-body images (Day 14): fetch each picture's URL in the
+    # article body (headers only). A fake/test client has no session —
+    # then the pictures cannot be fetched, so no claim is made either
+    # way (image_broken / image_unchecked stay empty and no warning
+    # is given). A real client always has one.
+    image_srcs = _image_srcs(html_text, info["url"])
+    images_skipped = max(0, len(image_srcs) - MAX_BODY_IMAGES)
+    image_broken = []
+    image_unchecked = []
+    images_checked = 0
+    session = getattr(client, "session", None)
+    if session is not None and info["status"] == 200 and image_srcs:
+        image_broken, image_unchecked = _check_image_urls(session, image_srcs[:MAX_BODY_IMAGES])
+        images_checked = min(len(image_srcs), MAX_BODY_IMAGES)
     warnings = []
     if info["status"] == 200:
         if canonical is not None:
@@ -611,6 +715,25 @@ def check_article(client, slug):
         if image_count is not None and images_missing_alt:
             plural = "image" if images_missing_alt == 1 else "images"
             warnings.append(f"{images_missing_alt} {plural} in the article have no alt text — Google and screen readers cannot tell what they show")
+        # Broken in-body images (Day 14): a picture that does not load
+        # shows readers a broken image. Unchecked pictures (fetch
+        # failed outright) warn that they could not be checked — no
+        # false "broken" flag. Pictures over the cap are reported as
+        # skipped, not silently ignored.
+        if image_broken:
+            count = len(image_broken)
+            plural = "image" if count == 1 else "images"
+            verb = "does" if count == 1 else "do"
+            shown = ", ".join(b["url"] for b in image_broken[:3])
+            extra = f" (+{count - 3} more)" if count > 3 else ""
+            warnings.append(f"{count} {plural} in the article {verb} not load ({shown}{extra}) — readers see a broken picture")
+        if image_unchecked:
+            count = len(image_unchecked)
+            plural = "image" if count == 1 else "images"
+            warnings.append(f"{count} {plural} in the article could not be checked — could not confirm the picture loads")
+        if images_skipped:
+            plural = "image" if images_skipped == 1 else "images"
+            warnings.append(f"{images_skipped} more {plural} in the article were not checked (over the {MAX_BODY_IMAGES}-picture cap)")
         if h1_count == 0:
             warnings.append("no <h1> heading — Google uses the H1 to understand what the page is about")
         elif h1_count > 1:
@@ -657,6 +780,10 @@ def check_article(client, slug):
         "title_length": title_length,
         "image_count": image_count,
         "images_missing_alt": images_missing_alt,
+        "image_broken": image_broken,
+        "image_unchecked": image_unchecked,
+        "images_checked": images_checked,
+        "images_skipped": images_skipped,
         "canonical": canonical,
         "canonical_found": canonical is not None,
         "canonical_matches": canonical_matches,
@@ -754,6 +881,8 @@ def _failed_result(slug, exc):
         "slug": slug, "url": "", "status": None, "title": "",
         "title_found": False, "title_length": 0,
         "image_count": None, "images_missing_alt": None,
+        "image_broken": [], "image_unchecked": [],
+        "images_checked": 0, "images_skipped": 0,
         "canonical": None,
         "canonical_found": False, "canonical_matches": False,
         "canonical_host_ok": True, "description": "",

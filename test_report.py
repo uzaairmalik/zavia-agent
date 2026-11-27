@@ -66,6 +66,7 @@ def _counts(**overrides):
         "structured_data_issues": 0,
         "title_issues": 0,
         "image_alt_issues": 0,
+        "broken_image_issues": 0,
         "junk_articles": 0,
         "total_issues": 0,
         "fail_issues": 0,

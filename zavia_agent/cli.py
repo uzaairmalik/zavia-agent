@@ -191,7 +191,7 @@ def do_bulk_seo(client, slugs, report_path=None):
     Returns the report dict (so --seo --articles can exit non-zero
     when an article fails its title/canonical check).
     """
-    print(f"\nChecking {len(slugs)} article(s) — title, canonical, meta description, OG tags, preview image, structured data, title length, image alt text...")
+    print(f"\nChecking {len(slugs)} article(s) — title, canonical, meta description, OG tags, preview image, structured data, title length, image alt text, broken images...")
     report = check_articles(client, slugs)
     for result in report["results"]:
         mark = "OK  " if result["ok"] and not result["warnings"] else ("WARN" if result["ok"] else "FAIL")
@@ -218,7 +218,7 @@ def do_seo_all(client, report_path=None):
     Returns the report dict (so --seo --all can exit non-zero when an
     article fails its title/canonical check).
     """
-    print("\nFull SEO audit — checking every article in the sitemap (title, canonical, meta description, OG tags, preview image, structured data, title length, image alt text)...")
+    print("\nFull SEO audit — checking every article in the sitemap (title, canonical, meta description, OG tags, preview image, structured data, title length, image alt text, broken images)...")
     print("This takes a minute or so — one quick request per article.")
     last_shown = [0]
 

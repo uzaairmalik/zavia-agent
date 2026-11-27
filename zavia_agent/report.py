@@ -10,7 +10,7 @@ Mon/Wed/Fri; this module is Zavia's version of it:
   reachability + URL count, duplicate slugs, a sample of URLs for
   broken links, per-article title/canonical/meta-description/OG/
   preview-image/H1/word-count/structured-data/title-length/
-  image-alt-text checks, plus the junk-article finder) and returns one
+  image-alt-text/broken-image checks, plus the junk-article finder) and returns one
   structured result.
 - compare_reports(previous, current): new vs fixed vs ongoing issues,
   plus per-count deltas labelled better/worse/same.
@@ -64,6 +64,7 @@ LOWER_IS_BETTER = (
     "structured_data_issues",
     "title_issues",
     "image_alt_issues",
+    "broken_image_issues",
     "junk_articles",
     "articles_failed",
     "articles_warned",
@@ -102,6 +103,7 @@ def run_audit(client=None, link_sample=10):
                  duplicate_slugs, duplicate_titles,
                  duplicate_descriptions, junk_articles, og_image_issues,
                  structured_data_issues, title_issues, image_alt_issues,
+                 broken_image_issues,
                  total_issues, fail_issues, warn_issues},
       "issues": [issue dict, ...],   # fails first, then warnings
       "checks": {"sitemap": str, "articles": str, "junk": str},
@@ -244,6 +246,21 @@ def run_audit(client=None, link_sample=10):
                 f"article:{slug}:missing-image-alt", "warn", "missing-image-alt", slug,
                 f"Article '{slug}' has {missing_alt} {plural} with no alt text — Google and screen readers cannot tell what they show.",
             ))
+        # Broken in-body images (Day 14): a picture inside the article
+        # body that does not load — readers see a broken picture. One
+        # issue per article (listing every broken URL), so fixing the
+        # pictures shows as "improved" next run. Pictures that could
+        # not be checked (timeout, DNS, ...) make no issue here —
+        # unknown is not broken (same rule as the og:image check).
+        broken_images = result.get("image_broken") or []
+        if broken_images:
+            shown = ", ".join(f"{b['url']} (HTTP {b['status']})" for b in broken_images)
+            plural = "image" if len(broken_images) == 1 else "images"
+            verb = "does" if len(broken_images) == 1 else "do"
+            issues.append(_issue(
+                f"article:{slug}:broken-images", "warn", "broken-image", slug,
+                f"Article '{slug}' has {len(broken_images)} {plural} that {verb} not load: {shown} — readers see a broken picture.",
+            ))
         # Content checks (Day 8): H1 count and thin content. Both are
         # warnings — the article loads and ranks, it just ranks worse.
         h1_count = result.get("h1_count")
@@ -324,6 +341,10 @@ def run_audit(client=None, link_sample=10):
             "image_alt_issues": sum(
                 1 for i in issues
                 if i["kind"] == "missing-image-alt"
+            ),
+            "broken_image_issues": sum(
+                1 for i in issues
+                if i["kind"] == "broken-image"
             ),
             "junk_articles": len(junk["junk"]),
             "total_issues": len(issues),
@@ -452,7 +473,7 @@ def _count_rows(audit):
     return [
         ("URLs in sitemap", counts["total_urls"]),
         ("Article URLs in sitemap", counts["article_urls"]),
-        ("Articles checked (title, canonical, meta description, OG tags, preview image, structured data, title length, image alt text)", counts["articles_checked"]),
+        ("Articles checked (title, canonical, meta description, OG tags, preview image, structured data, title length, image alt text, broken images)", counts["articles_checked"]),
         ("Articles failed (404 / no title / no canonical)", counts["articles_failed"]),
         ("Articles with warnings (missing description, OG tags, or preview image)", counts["articles_warned"]),
         ("Broken links in the sitemap sample", counts["broken_links"]),
@@ -465,6 +486,7 @@ def _count_rows(audit):
         ("Structured data problems (no JSON-LD / broken JSON-LD / no Article schema / missing headline, datePublished, author or image)", counts["structured_data_issues"]),
         ("Title problems (over 60 chars — Google cuts them off — or under 30)", counts["title_issues"]),
         ("Articles with images missing alt text", counts["image_alt_issues"]),
+        ("Articles with pictures that do not load (broken image in the body)", counts["broken_image_issues"]),
         ("Junk / test articles still live", counts["junk_articles"]),
         ("Total issues", counts["total_issues"]),
         ("— of which FAIL (must fix)", counts["fail_issues"]),

@@ -97,7 +97,8 @@ def main():
     # fields (added Day 12). Presence + types only — the exact
     # H1/word values are live content and change (a real article can
     # legitimately have 2 H1s or a long description; the precise
-    # logic is covered by the offline synthetic tests 8, 9, 11 and 12).
+    # logic is covered by the offline synthetic tests 8, 9, 11, 12
+    # and 14).
     try:
         if not first_slug:
             raise ZaviaError("No article slug from the sitemap to check.")
@@ -117,12 +118,18 @@ def main():
               and (one.get("images_missing_alt") is None
                    or isinstance(one.get("images_missing_alt"), int))
               and (one.get("image_count") is None
-                   or isinstance(one.get("image_count"), int)))
+                   or isinstance(one.get("image_count"), int))
+              and isinstance(one.get("image_broken"), list)
+              and isinstance(one.get("image_unchecked"), list)
+              and isinstance(one.get("images_checked"), int)
+              and isinstance(one.get("images_skipped"), int))
         detail = (f"{one['slug']}: canonical_matches={one['canonical_matches']}, "
                   f"description {one['description_length']} chars, "
                   f"title {one['title_length']} chars, "
                   f"h1_count={one['h1_count']}, word_count={one['word_count']}, "
                   f"images={one['image_count']} (missing alt: {one['images_missing_alt']}), "
+                  f"broken images={len(one['image_broken'])}, "
+                  f"unchecked={len(one['image_unchecked'])}, "
                   f"og_image={'yes' if one['og_image_found'] else 'no'}"
                   f" (loads={one['og_image_ok']}), "
                   f"twitter_card={'yes' if one['twitter_card_found'] else 'no'}, "
@@ -131,7 +138,7 @@ def main():
                   f"{len(one['warnings'])} warning(s)")
     except ZaviaError as exc:
         ok, detail = False, str(exc)
-    results.append(("Single-article check reports canonical + description length + H1/word count + preview image + structured data + title length + image alt text", ok, detail))
+    results.append(("Single-article check reports canonical + description length + H1/word count + preview image + structured data + title length + image alt text + broken images", ok, detail))
 
     # 6. Every module imports (the Day 6 refactor broke cli.py + web.py
     # silently by gutting report.py, and had also deleted this guard —
@@ -576,6 +583,107 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("Crawl-files check (offline fake robots.txt / llms.txt)", ok, detail))
+
+    # 14. Broken in-body image checks (offline — synthetic pages + a
+    # fake session, no network). A picture in the article body that
+    # 404s warns that it does not load; a picture whose fetch fails
+    # outright is unknown, not broken — it warns that it could not be
+    # checked, with no "does not load". A page whose pictures all load
+    # warns about nothing. data: URIs and <img> tags with no src are
+    # skipped (they are not links to fetch), and more than 10 pictures
+    # are capped — the rest are reported as skipped. An &amp; in a
+    # picture URL is unescaped before fetching (a Next.js image URL
+    # with &amp; taken raw returns HTTP 400 — a false "broken" flag
+    # caught live on Day 14), so the good page here carries one.
+    try:
+        class _FakePicResp:
+            def __init__(self, status):
+                self.status_code = status
+
+            def close(self):
+                pass
+
+        class _FakePicSession:
+            def __init__(self, answers):
+                self._answers = answers
+
+            def get(self, url, timeout=None, stream=False):
+                answer = self._answers.get(url, 404)
+                if isinstance(answer, Exception):
+                    raise answer
+                return _FakePicResp(answer)
+
+        class _FakePicClient:
+            def __init__(self, html_text, answers):
+                self._html = html_text
+                self.session = _FakePicSession(answers)
+
+            def get_article(self, slug):
+                return {"slug": slug, "url": "https://zaviamagazine.dev/article/" + slug,
+                        "status": 200, "title": "Fake Article About Learning Python Fast", "html": self._html}
+
+        def _pic_page(images):
+            head = ("<html><head><title>Fake Article</title>"
+                    '<link rel="canonical" href="https://zaviamagazine.dev/article/fake">'
+                    '<meta name="description" content="A fine description that is long enough to pass the fifty character minimum.">'
+                    '<meta property="og:title" content="Fake Article">'
+                    '<meta property="og:description" content="A fine description.">'
+                    '<meta property="og:image" content="https://example.com/og.jpg">'
+                    '<meta property="og:image:alt" content="A fake picture.">'
+                    '<meta name="twitter:card" content="summary_large_image">'
+                    '<script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting",'
+                    '"headline":"Fake Article","datePublished":"2026-11-25T00:00:00Z",'
+                    '"author":{"@type":"Person","name":"Uzair Malik"},'
+                    '"image":"https://example.com/og.jpg"}</script></head>')
+            body = ("<body><h1>Fake Article</h1><article><p>" + "word " * 350 + "</p>"
+                    + images + "</article></body></html>")
+            return head + body
+
+        good_pic = "https://example.com/good.jpg?a=1&b=2"
+        broken_pic = "https://example.com/broken.jpg"
+        slow_pic = "https://example.com/slow.jpg"
+        answers = {"https://example.com/good.jpg": 200, good_pic: 200,
+                   broken_pic: 404,
+                   slow_pic: ConnectionError("timed out"),
+                   "https://example.com/og.jpg": 200}
+        good = check_article(_FakePicClient(
+            _pic_page('<img src="https://example.com/good.jpg?a=1&amp;b=2" alt="A good picture.">'
+                      '<img src="data:image/png;base64,iVBORw0KGgo=" alt="Embedded.">'
+                      '<img alt="No src at all.">'),
+            answers), "fake")
+        broken = check_article(_FakePicClient(
+            _pic_page('<img src="https://example.com/good.jpg" alt="A good picture.">'
+                      '<img src="https://example.com/broken.jpg" alt="A broken picture.">'),
+            answers), "fake")
+        slow = check_article(_FakePicClient(
+            _pic_page('<img src="https://example.com/good.jpg" alt="A good picture.">'
+                      '<img src="https://example.com/slow.jpg" alt="A slow picture.">'),
+            answers), "fake")
+        many_answers = dict(answers)
+        many_answers.update({f"https://example.com/pic{i}.jpg": 200 for i in range(11)})
+        many = check_article(_FakePicClient(
+            _pic_page("".join(f'<img src="https://example.com/pic{i}.jpg" alt="Picture {i}.">' for i in range(11))),
+            many_answers), "fake")
+        ok = (good["image_broken"] == [] and good["image_unchecked"] == []
+              and good["images_checked"] == 1 and good["images_skipped"] == 0
+              and not good["warnings"]
+              and len(broken["image_broken"]) == 1
+              and broken["image_broken"][0] == {"url": broken_pic, "status": 404}
+              and broken["images_checked"] == 2
+              and any("not load" in w for w in broken["warnings"])
+              and slow["image_broken"] == [] and len(slow["image_unchecked"]) == 1
+              and slow["image_unchecked"][0]["url"] == slow_pic
+              and any("could not be checked" in w for w in slow["warnings"])
+              and not any("not load" in w for w in slow["warnings"])
+              and many["images_checked"] == 10 and many["images_skipped"] == 1
+              and any("were not checked" in w for w in many["warnings"]))
+        detail = (f"good: checked={good['images_checked']}, broken={len(good['image_broken'])}, warnings={len(good['warnings'])}; "
+                  f"broken: {broken['image_broken']}; "
+                  f"slow: unchecked={len(slow['image_unchecked'])}, warnings={len(slow['warnings'])}; "
+                  f"many: checked={many['images_checked']}, skipped={many['images_skipped']}")
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Broken in-body image checks (offline synthetic pages)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)
