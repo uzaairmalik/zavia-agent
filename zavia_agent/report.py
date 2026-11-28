@@ -10,7 +10,9 @@ Mon/Wed/Fri; this module is Zavia's version of it:
   reachability + URL count, duplicate slugs, a sample of URLs for
   broken links, per-article title/canonical/meta-description/OG/
   preview-image/H1/word-count/structured-data/title-length/
-  image-alt-text/broken-image checks, plus the junk-article finder) and returns one
+  image-alt-text/broken-image checks, per-page title/meta-
+  description/H1/canonical checks for every NON-article URL in the
+  sitemap, plus the junk-article finder) and returns one
   structured result.
 - compare_reports(previous, current): new vs fixed vs ongoing issues,
   plus per-count deltas labelled better/worse/same.
@@ -42,7 +44,8 @@ from urllib.parse import urlparse
 
 from .client import ZaviaClient
 from .seo import (TITLE_MAX_CHARS, TITLE_MIN_CHARS, THIN_CONTENT_WORDS,
-                  check_articles, check_sitemap, find_junk_articles)
+                  check_articles, check_sitemap, check_sitemap_pages,
+                  find_junk_articles)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORTS_DIR = os.path.join(REPO_ROOT, "reports")
@@ -65,12 +68,15 @@ LOWER_IS_BETTER = (
     "title_issues",
     "image_alt_issues",
     "broken_image_issues",
+    "page_issues",
+    "pages_failed",
+    "pages_warned",
     "junk_articles",
     "articles_failed",
     "articles_warned",
 )
 # Counts that are just reported (a change is neither good nor bad).
-INFO_COUNTS = ("total_urls", "article_urls", "articles_checked")
+INFO_COUNTS = ("total_urls", "article_urls", "articles_checked", "pages_checked")
 
 
 def _slug_of(url):
@@ -99,14 +105,15 @@ def run_audit(client=None, link_sample=10):
       "ran_at": str (ISO timestamp, UTC),
       "date": str (YYYY-MM-DD, UTC),
       "counts": {total_urls, article_urls, articles_checked,
-                 articles_failed, articles_warned, broken_links,
-                 duplicate_slugs, duplicate_titles,
+                 articles_failed, articles_warned, pages_checked,
+                 pages_failed, pages_warned, page_issues,
+                 broken_links, duplicate_slugs, duplicate_titles,
                  duplicate_descriptions, junk_articles, og_image_issues,
                  structured_data_issues, title_issues, image_alt_issues,
                  broken_image_issues,
                  total_issues, fail_issues, warn_issues},
       "issues": [issue dict, ...],   # fails first, then warnings
-      "checks": {"sitemap": str, "articles": str, "junk": str},
+      "checks": {"sitemap": str, "articles": str, "pages": str, "junk": str},
       "ok": bool,  # True when no FAIL issue was found
     }
     """
@@ -118,6 +125,7 @@ def run_audit(client=None, link_sample=10):
     article_urls = [u for u in urls if "/article/" in urlparse(u).path]
     slugs = [_slug_of(u) for u in article_urls if _slug_of(u)]
     articles = check_articles(client, slugs)
+    pages = check_sitemap_pages(client)
     junk = find_junk_articles(client)
 
     issues = []
@@ -279,6 +287,87 @@ def run_audit(client=None, link_sample=10):
                 f"article:{slug}:thin-content", "warn", "thin-content", slug,
                 f"Article '{slug}' is thin content — only {word_count} words in the article body (aim for {THIN_CONTENT_WORDS}+).",
             ))
+    # Non-article pages (Day 15): tools, games, guides, Quran pages
+    # and the homepage — the pages the article checks never see. A
+    # 404, a missing title or a missing canonical is a FAIL (the page
+    # cannot rank properly); a missing or odd-length description, a
+    # long/short title, a wrong H1 count or a canonical pointing
+    # elsewhere is a warning. One issue per problem, keyed on the
+    # page path, so fixing a page shows as "improved" next run.
+    for result in pages["results"]:
+        page = result["path"]
+        if result["status"] == 404:
+            issues.append(_issue(
+                f"page:{page}:not-found", "fail", "page-404", page,
+                f"Page '{page}' is a 404 (in the sitemap but not found).",
+            ))
+            continue
+        if result["status"] is None:
+            issues.append(_issue(
+                f"page:{page}:not-found", "fail", "page-404", page,
+                f"Page '{page}' could not be checked ({result['summary']}).",
+            ))
+            continue
+        if not result["title_found"]:
+            issues.append(_issue(
+                f"page:{page}:missing-title", "fail", "page-missing-title", page,
+                f"Page '{page}' loaded but has no <title>.",
+            ))
+        if not result["canonical_found"]:
+            issues.append(_issue(
+                f"page:{page}:missing-canonical", "fail", "page-missing-canonical", page,
+                f"Page '{page}' loaded but has no canonical link.",
+            ))
+        if not result["description_found"]:
+            issues.append(_issue(
+                f"page:{page}:missing-description", "warn", "page-missing-description", page,
+                f"Page '{page}' has no meta description (Google will write its own snippet).",
+            ))
+        else:
+            description_length = result.get("description_length") or 0
+            if description_length < 50:
+                issues.append(_issue(
+                    f"page:{page}:description-too-short", "warn", "page-description-length", page,
+                    f"Page '{page}' has a very short meta description ({description_length} chars) — aim for 50-160.",
+                ))
+            elif description_length > 160:
+                issues.append(_issue(
+                    f"page:{page}:description-too-long", "warn", "page-description-length", page,
+                    f"Page '{page}' has a long meta description ({description_length} chars) — Google truncates it after ~160.",
+                ))
+        title_length = result.get("title_length")
+        if result.get("title_found") and isinstance(title_length, int):
+            if title_length > TITLE_MAX_CHARS:
+                issues.append(_issue(
+                    f"page:{page}:title-too-long", "warn", "page-title-length", page,
+                    f"Page '{page}' has a long title ({title_length} chars) — Google cuts titles off after ~{TITLE_MAX_CHARS}.",
+                ))
+            elif title_length < TITLE_MIN_CHARS:
+                issues.append(_issue(
+                    f"page:{page}:title-too-short", "warn", "page-title-length", page,
+                    f"Page '{page}' has a very short title ({title_length} chars) — aim for {TITLE_MIN_CHARS}-{TITLE_MAX_CHARS}.",
+                ))
+        h1_count = result.get("h1_count")
+        if h1_count is not None and h1_count != 1:
+            detail = (
+                f"Page '{page}' has no <h1> heading — Google uses the H1 to understand what the page is about."
+                if h1_count == 0 else
+                f"Page '{page}' has {h1_count} <h1> headings — a page should have exactly one."
+            )
+            issues.append(_issue(
+                f"page:{page}:h1", "warn", "page-h1", page, detail,
+            ))
+        if result.get("canonical_found"):
+            if not result.get("canonical_host_ok"):
+                issues.append(_issue(
+                    f"page:{page}:canonical-wrong-site", "warn", "page-canonical-mismatch", page,
+                    f"Page '{page}' has a canonical pointing to a different site ({result.get('canonical')}) — it should be zaviamagazine.dev.",
+                ))
+            elif not result.get("canonical_matches"):
+                issues.append(_issue(
+                    f"page:{page}:canonical-wrong-page", "warn", "page-canonical-mismatch", page,
+                    f"Page '{page}' has a canonical pointing to a different page ({result.get('canonical')}) — it should be this page's own URL.",
+                ))
     for item in junk["junk"]:
         issues.append(_issue(
             f"junk-article:{item['slug']}", "warn", "junk-article", item["slug"],
@@ -318,6 +407,9 @@ def run_audit(client=None, link_sample=10):
             "articles_checked": articles["checked"],
             "articles_failed": articles["failed"],
             "articles_warned": articles["warned"],
+            "pages_checked": pages["checked"],
+            "pages_failed": pages["failed"],
+            "pages_warned": pages["warned"],
             "broken_links": len(sitemap["broken"]),
             "duplicate_slugs": len(sitemap["duplicate_slugs"]),
             "duplicate_titles": len(articles.get("duplicate_titles") or []),
@@ -346,6 +438,10 @@ def run_audit(client=None, link_sample=10):
                 1 for i in issues
                 if i["kind"] == "broken-image"
             ),
+            "page_issues": sum(
+                1 for i in issues
+                if i["kind"].startswith("page-")
+            ),
             "junk_articles": len(junk["junk"]),
             "total_issues": len(issues),
             "fail_issues": fail_count,
@@ -355,6 +451,7 @@ def run_audit(client=None, link_sample=10):
         "checks": {
             "sitemap": sitemap["summary"],
             "articles": articles["summary"],
+            "pages": pages["summary"],
             "junk": junk["summary"],
         },
         "ok": fail_count == 0,
@@ -487,6 +584,10 @@ def _count_rows(audit):
         ("Title problems (over 60 chars — Google cuts them off — or under 30)", counts["title_issues"]),
         ("Articles with images missing alt text", counts["image_alt_issues"]),
         ("Articles with pictures that do not load (broken image in the body)", counts["broken_image_issues"]),
+        ("Non-article pages checked (title, meta description, H1 count, canonical)", counts["pages_checked"]),
+        ("Non-article pages failed (404 / no title / no canonical)", counts["pages_failed"]),
+        ("Non-article pages with warnings (missing or odd-length description, wrong H1 count, canonical pointing elsewhere)", counts["pages_warned"]),
+        ("Non-article page SEO problems (missing description, long/short title, wrong H1 count, canonical pointing elsewhere)", counts["page_issues"]),
         ("Junk / test articles still live", counts["junk_articles"]),
         ("Total issues", counts["total_issues"]),
         ("— of which FAIL (must fix)", counts["fail_issues"]),
@@ -527,6 +628,10 @@ def render_markdown(audit, comparison):
         "",
         "Articles: " + audit["checks"]["articles"],
         "",
+    ]
+    if audit["checks"].get("pages"):
+        lines += ["Pages: " + audit["checks"]["pages"], ""]
+    lines += [
         "Junk: " + audit["checks"]["junk"],
         "",
         "## Issues found",
@@ -671,6 +776,7 @@ def render_html(audit, comparison):
 {count_table()}
 <p>Sitemap: {esc(audit['checks']['sitemap'])}</p>
 <p>Articles: {esc(audit['checks']['articles'])}</p>
+{f"<p>Pages: {esc(audit['checks']['pages'])}</p>" if audit['checks'].get('pages') else ""}
 <p>Junk: {esc(audit['checks']['junk'])}</p>
 <h2>Issues found</h2>
 {issues_html}

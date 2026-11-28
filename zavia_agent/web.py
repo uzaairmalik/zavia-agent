@@ -19,7 +19,8 @@ from flask import Flask, abort, render_template_string, request, send_from_direc
 from .client import ZaviaClient, ZaviaError
 from .health import check_site
 from .report import REPORTS_DIR, latest_report_info, list_reports
-from .seo import check_crawl_files, check_sitemap, check_sitemap_live
+from .seo import (check_crawl_files, check_sitemap, check_sitemap_live,
+                   check_sitemap_pages)
 
 app = Flask(__name__)
 
@@ -90,6 +91,9 @@ PAGE = """<!doctype html>
 <form method="post" action="/crawl-check"><button type="submit">Check the crawl files (robots.txt + llms.txt)</button></form>
 <p class="note">The files crawlers read before anything else — a robots.txt that blocks everything would stop Google crawling the whole site.</p>
 {% if crawl_msg %}<p class="msg">{{ crawl_msg }}</p>{% endif %}
+<form method="post" action="/pages-check"><button type="submit">Check the non-article pages (tools, games, guides, Quran)</button></form>
+<p class="note">Every page in the sitemap that is not an article, checked for title, meta description, H1 count and canonical — the checks the article audit never sees. Takes a minute or so.</p>
+{% if pages_msg %}<p class="msg">{{ pages_msg }}</p>{% endif %}
 </div>
 
 <div class="card">
@@ -169,7 +173,7 @@ def home():
     return render_template_string(
         PAGE, health=health, health_error=health_error,
         article_count=article_count, token_set=bool(client.token),
-        publish_msg="", seo_msg="", sitemap_msg="", crawl_msg="", reports=latest_report_info(),
+        publish_msg="", seo_msg="", sitemap_msg="", crawl_msg="", pages_msg="", reports=latest_report_info(),
     )
 
 
@@ -226,7 +230,7 @@ def publish():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg=msg, seo_msg="",
-        sitemap_msg="", crawl_msg="", reports=latest_report_info(),
+        sitemap_msg="", crawl_msg="", pages_msg="", reports=latest_report_info(),
     )
 
 
@@ -254,7 +258,7 @@ def seo():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg="", seo_msg=msg,
-        sitemap_msg="", crawl_msg="", reports=latest_report_info(),
+        sitemap_msg="", crawl_msg="", pages_msg="", reports=latest_report_info(),
     )
 
 
@@ -287,7 +291,7 @@ def sitemap_check():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg="", seo_msg="",
-        sitemap_msg=msg, crawl_msg="", reports=latest_report_info(),
+        sitemap_msg=msg, crawl_msg="", pages_msg="", reports=latest_report_info(),
     )
 
 
@@ -321,7 +325,41 @@ def crawl_check():
     return render_template_string(
         PAGE, health=health, health_error="", article_count=article_count,
         token_set=bool(client.token), publish_msg="", seo_msg="",
-        sitemap_msg="", crawl_msg=msg, reports=latest_report_info(),
+        sitemap_msg="", crawl_msg=msg, pages_msg="", reports=latest_report_info(),
+    )
+
+
+@app.route("/pages-check", methods=["POST"])
+def pages_check():
+    """Check SEO basics on every non-article page in the sitemap."""
+    client = _client()
+    try:
+        report = check_sitemap_pages(client)
+        lines = [report["summary"]]
+        if report["failed"]:
+            lines.append("Failed (missing title/canonical, or a 404) — fix these first:")
+            for result in report["results"]:
+                if not result["ok"]:
+                    lines.append(f"  - {result['url']} — {result['summary']}")
+        if report["warned"]:
+            lines.append("Warnings (page loads, but looks worse in search results):")
+            for result in report["results"]:
+                if result["ok"] and result["warnings"]:
+                    lines.append(f"  - {result['url']} — " + "; ".join(result["warnings"]))
+        msg = "\n".join(lines)
+    except ZaviaError as exc:
+        msg = "Pages check failed:\n" + str(exc)
+    except Exception as exc:
+        msg = f"Unexpected error ({type(exc).__name__}): {exc}"
+    try:
+        health = check_site(client, retries=1, delay=0)
+        article_count = health["sitemap"].get("count")
+    except Exception:
+        health, article_count = None, None
+    return render_template_string(
+        PAGE, health=health, health_error="", article_count=article_count,
+        token_set=bool(client.token), publish_msg="", seo_msg="",
+        sitemap_msg="", crawl_msg="", pages_msg=msg, reports=latest_report_info(),
     )
 
 

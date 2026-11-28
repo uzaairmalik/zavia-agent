@@ -15,6 +15,7 @@ Or run one job directly (no menu):
     python -m zavia_agent.cli --links   (scan the homepage's links)
     python -m zavia_agent.cli --sitemap-check
     python -m zavia_agent.cli --crawl-check
+    python -m zavia_agent.cli --pages-check
     python -m zavia_agent.cli --list
     python -m zavia_agent.cli --publish examples/sample-article.md
     python -m zavia_agent.cli --update update.json
@@ -35,7 +36,8 @@ from .report import (compare_reports, default_report_path, load_previous_state,
                      run_audit, write_report, write_seo_report)
 from .seo import (check_article, check_articles, check_crawl_files,
                    check_links, check_sitemap, check_sitemap_live,
-                   check_sitemap_seo, find_junk_articles)
+                   check_sitemap_pages, check_sitemap_seo,
+                   find_junk_articles)
 
 
 # ---------------------------------------------------------------- front-matter
@@ -316,6 +318,34 @@ def do_crawl_files(client):
     return report
 
 
+def do_pages_check(client):
+    """Check SEO basics on every non-article page in the sitemap.
+
+    Returns the report dict (so --pages-check can exit non-zero when
+    a page fails its title/canonical check).
+    """
+    print("\nPages check — checking every non-article page in the sitemap (tools, games, guides, Quran pages, homepage)...")
+    print("This takes a minute or so — one quick request per page.")
+
+    def _progress(done, total):
+        if done % 25 == 0 or done == total:
+            print(f"  ... {done}/{total} checked")
+
+    report = check_sitemap_pages(client, progress=_progress)
+    if report["failed"]:
+        print("\nFailed (missing title/canonical, or a 404) — fix these first:")
+        for result in report["results"]:
+            if not result["ok"]:
+                print(f"  - {result['url']} — {result['summary']}")
+    if report["warned"]:
+        print("\nWarnings (page loads, but looks worse in search results):")
+        for result in report["results"]:
+            if result["ok"] and result["warnings"]:
+                print(f"  - {result['url']} — " + "; ".join(result["warnings"]))
+    print("\n" + report["summary"])
+    return report
+
+
 def do_config(client):
     print("\nConfig / status")
     print(f"  Site (base URL): {client.base_url}")
@@ -386,6 +416,7 @@ MENU = """
  12  SEO audit report (full audit + dated report, compared with last run)
  13  Sitemap liveness check (every URL in the sitemap — find dead pages)
  14  Crawl-files check (/robots.txt + /llms.txt — what crawlers read first)
+ 15  Pages check (every non-article page in the sitemap — tools, games, guides, Quran)
   0  Exit
 =============================================
 """
@@ -445,8 +476,10 @@ def interactive(client):
                 do_sitemap_check(client)
             elif choice == "14":
                 do_crawl_files(client)
+            elif choice == "15":
+                do_pages_check(client)
             else:
-                print(f"'{choice}' is not on the menu. Pick a number 0-14.")
+                print(f"'{choice}' is not on the menu. Pick a number 0-15.")
         except FileNotFoundError as exc:
             print(f"\nFile not found: {exc.filename or exc}. Check the path and try again.")
         except ZaviaError as exc:
@@ -482,6 +515,8 @@ def main(argv=None):
                         help="Check EVERY URL in the sitemap and list the dead ones (not just a 10-URL sample) and exit.")
     parser.add_argument("--crawl-check", action="store_true",
                         help="Check /robots.txt and /llms.txt (the files crawlers read first) and exit.")
+    parser.add_argument("--pages-check", action="store_true",
+                        help="Check SEO basics on every non-article page in the sitemap (tools, games, guides, Quran pages, homepage) and exit.")
     args = parser.parse_args(argv)
 
     client = ZaviaClient()
@@ -500,6 +535,9 @@ def main(argv=None):
             return 0 if report["ok"] else 1
         if args.crawl_check:
             report = do_crawl_files(client)
+            return 0 if report["ok"] else 1
+        if args.pages_check:
+            report = do_pages_check(client)
             return 0 if report["ok"] else 1
         if args.seo:
             if args.all:

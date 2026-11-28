@@ -19,9 +19,9 @@ sys.path.insert(0, ".")  # so `zavia_agent` imports from this folder
 from zavia_agent.client import ZaviaClient, ZaviaError
 from zavia_agent.report import write_seo_report
 from zavia_agent.seo import (_article_word_count, _h1_count, _parse_robots,
-                             check_article, check_crawl_files,
-                             check_sitemap_live, check_sitemap_seo,
-                             find_duplicate_meta)
+                             check_article, check_crawl_files, check_page,
+                             check_sitemap_live, check_sitemap_pages,
+                             check_sitemap_seo, find_duplicate_meta)
 
 
 def main():
@@ -684,6 +684,114 @@ def main():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     results.append(("Broken in-body image checks (offline synthetic pages)", ok, detail))
+
+    # 15. Non-article pages check (Day 15 — offline synthetic pages
+    # + a fake sitemap, no network, plus a small live sample). A good
+    # page (title 30-60 chars, description 50-160, one H1, canonical
+    # pointing at itself) is OK with no warnings; a page with a long
+    # title, no description, two H1s and a canonical pointing at a
+    # different page warns about all four but still loads; a page
+    # with no title and no canonical fails; a 404 page fails. The
+    # sitemap sweep checks only non-article URLs — article URLs are
+    # never fetched — and reports progress once per page.
+    try:
+        class _FakePageResp:
+            def __init__(self, status, text=""):
+                self.status_code = status
+                self.text = text
+
+        class _FakePageSession:
+            def __init__(self, answers):
+                self._answers = answers
+                self.fetched = []
+
+            def get(self, url, timeout=None):
+                self.fetched.append(url)
+                status, text = self._answers.get(url, (404, ""))
+                return _FakePageResp(status, text)
+
+        class _FakePageClient:
+            def __init__(self, urls, answers):
+                self.base_url = "https://zaviamagazine.dev"
+                self.session = _FakePageSession(answers)
+                self._urls = urls
+
+            def get_sitemap_urls(self):
+                return list(self._urls)
+
+        def _page_html(title=None, description=None, canonical=None, h1s=1):
+            head = "<html><head>"
+            if title is not None:
+                head += "<title>" + title + "</title>"
+            if description is not None:
+                head += '<meta name="description" content="' + description + '">'
+            if canonical is not None:
+                head += '<link rel="canonical" href="' + canonical + '">'
+            head += "</head><body>"
+            for i in range(h1s):
+                head += f"<h1>Heading {i + 1}</h1>"
+            return head + "<p>Some page content here.</p></body></html>"
+
+        good_title = "Fake Tools Page About Calculators Here"  # 38 chars
+        long_title = "Fake Tools Page About Calculators for Students in Pakistan Today Here"  # 69 chars
+        good_desc = ("A fine description that is long enough to pass the fifty character "
+                     "minimum for a tools page.")
+        base = "https://zaviamagazine.dev"
+        good_url = base + "/tools/fake-tool"
+        bad_url = base + "/tools/bad-tool"
+        missing_url = base + "/tools/missing-tool"
+        dead_url = base + "/tools/dead-tool"
+        pages = {
+            good_url: (200, _page_html(good_title, good_desc, good_url, h1s=1)),
+            bad_url: (200, _page_html(long_title, None, base + "/tools/other-tool", h1s=2)),
+            missing_url: (200, _page_html(None, good_desc, None, h1s=1)),
+            dead_url: (404, "<html><head><title>Not found</title></head><body></body></html>"),
+        }
+        fake_client = _FakePageClient(list(pages), pages)
+        good = check_page(fake_client, good_url)
+        bad = check_page(fake_client, bad_url)
+        missing = check_page(fake_client, missing_url)
+        dead = check_page(fake_client, dead_url)
+        sitemap_urls = [base + "/article/some-article", base + "/article/other-article",
+                        good_url, bad_url, missing_url]
+        sweep_client = _FakePageClient(sitemap_urls, pages)
+        seen = []
+        sweep = check_sitemap_pages(sweep_client, progress=lambda d, t: seen.append((d, t)))
+        offline_ok = (
+            good["ok"] and not good["warnings"] and good["title_length"] == 38
+            and good["description_length"] == len(good_desc)
+            and good["h1_count"] == 1 and good["canonical_matches"]
+            and bad["ok"] and bad["title_length"] == 69
+            and any("title is long (69 chars)" in w for w in bad["warnings"])
+            and any("no meta description" in w for w in bad["warnings"])
+            and any("2 <h1>" in w for w in bad["warnings"])
+            and any("canonical points to a different page" in w for w in bad["warnings"])
+            and not missing["ok"] and not missing["title_found"]
+            and not missing["canonical_found"]
+            and not dead["ok"] and dead["status"] == 404
+            and sweep["checked"] == 3 and sweep["failed"] == 1 and sweep["warned"] == 1
+            and sweep["failed_urls"] == [missing_url] and sweep["warned_urls"] == [bad_url]
+            and len(seen) == 3 and seen[-1] == (3, 3)
+            and not any("/article/" in u for u in sweep_client.session.fetched)
+        )
+        detail_offline = (f"good: ok={good['ok']}, warnings={len(good['warnings'])}; "
+                          f"bad: warnings={len(bad['warnings'])}; "
+                          f"missing: ok={missing['ok']}; dead: status={dead['status']}; "
+                          f"sweep: checked={sweep['checked']}, failed={sweep['failed']}, "
+                          f"warned={sweep['warned']}, fetched={len(sweep_client.session.fetched)} URLs (no articles)")
+        # Live sample: the first 3 non-article pages in the real sitemap.
+        try:
+            live = check_sitemap_pages(client, limit=3)
+            live_ok = (live["checked"] == 3 and "failed" in live and "warned" in live
+                       and all("title_found" in r and "h1_count" in r for r in live["results"]))
+            detail = detail_offline + (f"; live sample: {live['checked']} pages checked, "
+                                       f"{live['failed']} failed, {live['warned']} with warnings")
+            ok = offline_ok and live_ok
+        except ZaviaError as exc:
+            ok, detail = False, detail_offline + f"; live sample failed: {exc}"
+    except Exception as exc:
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    results.append(("Non-article pages check (offline synthetic pages + live sample)", ok, detail))
 
     print("Zavia agent — smoke test (no token needed)")
     print("-" * 55)

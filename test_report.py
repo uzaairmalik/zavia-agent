@@ -44,7 +44,7 @@ def _audit(issues, counts, date="2026-11-17"):
         "date": date,
         "counts": counts,
         "issues": issues,
-        "checks": {"sitemap": "sitemap ok", "articles": "articles ok", "junk": "junk ok"},
+        "checks": {"sitemap": "sitemap ok", "articles": "articles ok", "pages": "pages ok", "junk": "junk ok"},
         "ok": all(i["severity"] != "fail" for i in issues),
     }
 
@@ -56,6 +56,10 @@ def _counts(**overrides):
         "articles_checked": 66,
         "articles_failed": 0,
         "articles_warned": 0,
+        "pages_checked": 114,
+        "pages_failed": 0,
+        "pages_warned": 0,
+        "page_issues": 0,
         "broken_links": 0,
         "duplicate_slugs": 0,
         "duplicate_titles": 0,

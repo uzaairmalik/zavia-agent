@@ -40,6 +40,13 @@
 - check_articles(slugs): same checks for several slugs at once.
 - check_sitemap_seo(): same checks for EVERY article in the sitemap
   (a weekly sweep — no slug list to type).
+- check_page(url): the same SEO basics (title, title length, meta
+  description, H1 count, canonical) for one NON-article page — a
+  tools, games, guides or Quran page. Every check so far was
+  article-only, so a game page with no meta description or five H1s
+  went unnoticed.
+- check_sitemap_pages(): the same checks for EVERY non-article URL
+  in the sitemap (no list to type).
 - find_duplicate_meta(results): titles / meta descriptions shared by
   more than one article — Google shows the same title/snippet for
   both, so each article needs its own. Used by the bulk check and the
@@ -88,6 +95,10 @@ TAG_RE = re.compile(r'<[^>]+>')
 THIN_CONTENT_WORDS = 300
 # Meta description + Open Graph tags (Google + social previews use these).
 DESCRIPTION_RE = re.compile(r'<meta[^>]+name=["\']description["\'][^>]*>', re.IGNORECASE)
+# The <title> tag itself (Day 15): check_article() gets the title from
+# the client, but a non-article page is fetched directly, so the title
+# has to be pulled out of the HTML here.
+TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 # Title length (Day 12): Google shows about 60 characters of a title
 # in search results — longer titles get cut off mid-word. A title
 # under 30 characters says almost nothing about the article.
@@ -1034,6 +1045,234 @@ def check_sitemap_seo(client=None, limit=150, progress=None):
         "warned_slugs": [r["slug"] for r in warned],
         "duplicate_titles": duplicates["duplicate_titles"],
         "duplicate_descriptions": duplicates["duplicate_descriptions"],
+        "ok": ok,
+        "summary": "; ".join(parts) + ".",
+    }
+
+
+def check_page(client, url, timeout=10):
+    """Check one NON-article page for the SEO basics.
+
+    Articles are covered by check_article(); this one covers the rest
+    of the site — the tools pages, the games, the guides, the Quran
+    pages and the homepage. The 27 Nov SEO review found game pages
+    with no meta description (7 of 11) and wrong H1 counts (Shadow
+    Ops had 5, Tetris and Brick Breaker had 0) — none of that showed
+    up in the article checks, because these pages are not articles.
+
+    Same rules as check_article(), minus the article-only checks (no
+    word count — these pages have no <article> body to measure — no
+    structured-data Article node, no preview image, no body pictures):
+    - Title present and 30-60 chars (Google cuts longer titles off).
+    - Meta description present and 50-160 chars (Google truncates
+      longer ones, and writes its own snippet when there is none).
+    - Exactly one <h1> heading.
+    - Canonical present, pointing at this page's own path on a Zavia
+      host (either host is fine — only the path has to match).
+
+    A non-200 status, a missing title or a missing canonical is a
+    failure (ok False, exit 1); everything else is a warning — the
+    page loads, it just looks worse in search results. A page that
+    could not be fetched at all (timeout, DNS, ...) is a failure
+    too, and says so plainly instead of pretending it was checked.
+
+    Returns a dict:
+    {
+      "url": str, "path": str, "status": int|None,
+      "title": str, "title_found": bool, "title_length": int,
+      "canonical": str|None, "canonical_found": bool,
+      "canonical_matches": bool, "canonical_host_ok": bool,
+      "description": str, "description_full": str,
+      "description_found": bool, "description_length": int,
+      "h1_count": int,
+      "warnings": [str, ...],
+      "ok": bool, "summary": str,
+    }
+    """
+    path = urlparse(url).path.rstrip("/") or "/"
+    try:
+        # Plain session GET (no client retries — a page that needs
+        # three attempts is slow enough to count as broken, and a
+        # retry would hide a flapping database).
+        resp = client.session.get(url, timeout=timeout)
+        status, html_text = resp.status_code, resp.text
+    except Exception as exc:  # network error, timeout, DNS, ...
+        return {
+            "url": url, "path": path, "status": None,
+            "title": "", "title_found": False, "title_length": 0,
+            "canonical": None, "canonical_found": False,
+            "canonical_matches": False, "canonical_host_ok": True,
+            "description": "", "description_full": "",
+            "description_found": False, "description_length": 0,
+            "h1_count": 0, "warnings": [], "ok": False,
+            "summary": f"Page {url} could not be checked: {str(exc)[:120]}",
+        }
+    title = ""
+    title_found = False
+    match = TITLE_TAG_RE.search(html_text or "")
+    if match:
+        # Strip any tags inside the title (there should not be any)
+        # and unescape entities, so &#x27; counts as one character.
+        title = html.unescape(TAG_RE.sub(" ", match.group(1))).strip()
+        title_found = bool(title)
+    title_length = len(title) if title_found else 0
+    canonical = None
+    match = CANONICAL_RE.search(html_text or "")
+    if match:
+        href = HREF_RE.search(match.group(0))
+        if href:
+            canonical = href.group(1)
+    canonical_matches = False
+    canonical_host_ok = True
+    if canonical:
+        parsed_canon = urlparse(canonical if "://" in canonical else urljoin(url, canonical))
+        canonical_matches = parsed_canon.path.rstrip("/") == path
+        canonical_host_ok = not parsed_canon.netloc or parsed_canon.netloc in INTERNAL_HOSTS
+    description = ""
+    description_found = False
+    match = DESCRIPTION_RE.search(html_text or "")
+    if match:
+        content = CONTENT_RE.search(match.group(0))
+        if content:
+            description = content.group(1).strip()
+            description_found = bool(description)
+    description_length = len(html.unescape(description)) if description_found else 0
+    h1_count = _h1_count(html_text or "")
+    warnings = []
+    if status == 200:
+        if canonical is not None:
+            if not canonical_host_ok:
+                warnings.append(f"canonical points to a different site ({urlparse(canonical).netloc}) — it should be zaviamagazine.dev")
+            elif not canonical_matches:
+                warnings.append(f"canonical points to a different page ({canonical}) — it should be this page's own URL")
+        if not description_found:
+            warnings.append("no meta description (Google will write its own snippet)")
+        elif description_length < 50:
+            warnings.append(f"meta description is very short ({description_length} chars) — aim for 50-160")
+        elif description_length > 160:
+            warnings.append(f"meta description is long ({description_length} chars) — Google truncates it after ~160")
+        if title_found:
+            if title_length > TITLE_MAX_CHARS:
+                warnings.append(f"title is long ({title_length} chars) — Google cuts titles off after ~{TITLE_MAX_CHARS}")
+            elif title_length < TITLE_MIN_CHARS:
+                warnings.append(f"title is very short ({title_length} chars) — aim for {TITLE_MIN_CHARS}-{TITLE_MAX_CHARS}")
+        if h1_count == 0:
+            warnings.append("no <h1> heading — Google uses the H1 to understand what the page is about")
+        elif h1_count > 1:
+            warnings.append(f"{h1_count} <h1> headings — a page should have exactly one")
+    ok = status == 200 and title_found and canonical is not None
+    if status == 404:
+        summary = f"Page {url} is a 404 (not found)."
+    elif status != 200:
+        summary = f"Page {url} returned HTTP {status}."
+    elif not title_found:
+        summary = f"Page {url} loaded (HTTP {status}) but has no <title>."
+    elif canonical is None:
+        summary = f"Page {url} loaded but has no canonical link."
+    else:
+        summary = f"Page {url} OK — title present, canonical: {canonical}."
+    if warnings:
+        summary += " Warning: " + "; ".join(warnings) + "."
+    return {
+        "url": url,
+        "path": path,
+        "status": status,
+        "title": title,
+        "title_found": title_found,
+        "title_length": title_length,
+        "canonical": canonical,
+        "canonical_found": canonical is not None,
+        "canonical_matches": canonical_matches,
+        "canonical_host_ok": canonical_host_ok,
+        "description": description[:160],
+        "description_full": html.unescape(description).strip() if description_found else "",
+        "description_found": description_found,
+        "description_length": description_length,
+        "h1_count": h1_count,
+        "warnings": warnings,
+        "ok": ok,
+        "summary": summary,
+    }
+
+
+def _failed_page_result(url, exc):
+    """A check_page-shaped dict for a page that could not be checked."""
+    path = urlparse(url).path.rstrip("/") or "/"
+    return {
+        "url": url, "path": path, "status": None,
+        "title": "", "title_found": False, "title_length": 0,
+        "canonical": None, "canonical_found": False,
+        "canonical_matches": False, "canonical_host_ok": True,
+        "description": "", "description_full": "",
+        "description_found": False, "description_length": 0,
+        "h1_count": 0, "warnings": [], "ok": False,
+        "summary": f"Page {url} could not be checked: {exc}",
+    }
+
+
+def check_sitemap_pages(client=None, limit=250, progress=None):
+    """Check SEO basics on EVERY non-article URL in the sitemap.
+
+    Same per-page checks as check_page (title, title length, meta
+    description, H1 count, canonical), but the URLs come from the
+    sitemap itself — no list to type. Article URLs are skipped (they
+    are check_article()'s job); everything else is checked: the
+    tools pages, the games, the guides, the Quran pages, the hubs
+    and the homepage.
+
+    limit: max pages to check (the sitemap holds ~115 non-article
+    URLs; the cap keeps a bad day quick). progress: optional
+    callback called as progress(done, total) after each page.
+
+    Returns a dict:
+    {
+      "results": [check_page(...) dict, ...],
+      "checked": int, "failed": int, "warned": int,
+      "failed_urls": [str, ...], "warned_urls": [str, ...],
+      "ok": bool,   # True only when no page failed title/canonical
+      "summary": str,
+    }
+    A missing meta description or a wrong H1 count is a warning, not
+    a failure — the page still loads, it just looks worse in search
+    results. A 404, a missing title or a missing canonical is a
+    failure (exit 1).
+    """
+    client = client or ZaviaClient()
+    urls = client.get_sitemap_urls()
+    page_urls = []
+    seen = set()
+    for url in urls:
+        if "/article/" in urlparse(url).path:
+            continue  # articles are check_article()'s job
+        if url not in seen:
+            seen.add(url)
+            page_urls.append(url)
+    page_urls = page_urls[:limit]
+    results = []
+    for i, url in enumerate(page_urls, 1):
+        try:
+            results.append(check_page(client, url))
+        except ZaviaError as exc:
+            results.append(_failed_page_result(url, exc))
+        if progress:
+            progress(i, len(page_urls))
+    failed = [r for r in results if not r["ok"]]
+    warned = [r for r in results if r["ok"] and r["warnings"]]
+    ok = not failed
+    parts = [f"Checked {len(results)} non-article page(s) from the sitemap"]
+    if failed:
+        parts.append(f"{len(failed)} failed: " + ", ".join(r["url"] for r in failed))
+    if warned:
+        parts.append(f"{len(warned)} with warnings: " + ", ".join(r["url"] for r in warned))
+    if not failed and not warned:
+        parts.append("all OK — titles, canonicals, meta descriptions and H1 counts present")
+    return {
+        "results": results,
+        "checked": len(results),
+        "failed": len(failed),
+        "warned": len(warned),
+        "failed_urls": [r["url"] for r in failed],
+        "warned_urls": [r["url"] for r in warned],
         "ok": ok,
         "summary": "; ".join(parts) + ".",
     }

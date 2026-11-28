@@ -3,7 +3,7 @@
 A small, friendly, ready-to-use agent for the **Zavia blog**
 ([zaviamagazine.dev](https://zaviamagazine.dev)).
 
-It does ten useful jobs, and nothing else:
+It does eleven useful jobs, and nothing else:
 
 1. **Health check** — is the site up? (homepage, sitemap, API)
 2. **Publish / update articles** — from a Markdown file or a JSON file
@@ -15,6 +15,7 @@ It does ten useful jobs, and nothing else:
 8. **Web dashboard** — the same jobs in your browser
 9. **Sitemap liveness check** — every URL in the sitemap fetched, so dead pages (articles lost from the database that Google still links to) get found in one run
 10. **Crawl-files check** — `/robots.txt` and `/llms.txt`, the files crawlers read before anything else: a robots.txt that blocks every crawler would stop Google crawling the whole site, so that is a failure; a missing robots.txt, a robots.txt with no Sitemap line, or a missing llms.txt are warnings
+11. **Pages check** — every non-article page in the sitemap (the tools pages, the games, the guides, the Quran pages, the homepage) for title, meta description, H1 count and canonical — the pages the article checks never see, so a game page with no meta description or five H1s finally shows up
 
 Built for Uzair (BCS student, Pakistan). Simple English, a little Roman
 Urdu where natural, and it never crashes on a bad input — it explains
@@ -67,6 +68,7 @@ python -m zavia_agent.cli
  12  SEO audit report (full audit + dated report, compared with last run)
  13  Sitemap liveness check (every URL in the sitemap — find dead pages)
  14  Crawl-files check (/robots.txt + /llms.txt — what crawlers read first)
+ 15  Pages check (every non-article page in the sitemap — tools, games, guides, Quran)
   0  Exit
 =============================================
 ```
@@ -86,6 +88,7 @@ python -m zavia_agent.cli --links my-article-slug
 python -m zavia_agent.cli --links   # scan the homepage's links
 python -m zavia_agent.cli --sitemap-check   # every URL in the sitemap, find the dead ones
 python -m zavia_agent.cli --crawl-check   # /robots.txt + /llms.txt, the files crawlers read first
+python -m zavia_agent.cli --pages-check   # every non-article page in the sitemap: title, meta description, H1, canonical
 python -m zavia_agent.cli --junk
 python -m zavia_agent.cli --list
 python -m zavia_agent.cli --publish examples/sample-article.md
@@ -208,7 +211,8 @@ python -m zavia_agent.cli --seo-report
 
 One run audits the whole live site (sitemap reachability + URL count,
 duplicate slugs, a sample of URLs for broken links, **every** article
-for title/canonical/meta-description/OG tags/preview image/H1/word count/structured data/title length/image alt text/broken images, and the
+for title/canonical/meta-description/OG tags/preview image/H1/word count/structured data/title length/image alt text/broken images, **every**
+non-article page for title/meta description/H1 count/canonical, and the
 junk-article finder), then writes a dated report — Markdown + HTML — under
 `reports/` (e.g. `seo-report-2026-11-20-0005.md`) and stores the
 result in `state/last-audit.json` (gitignored) for the next
@@ -302,6 +306,34 @@ narrowing it to one path, e.g. `Disallow: /admin/`). One caution: a
 of its short drops — wait a few minutes and run it again. The
 dashboard has the same check as a button in its SEO card.
 
+### Pages check (every non-article page in the sitemap)
+
+```bash
+python -m zavia_agent.cli --pages-check
+# Pages check — checking every non-article page in the sitemap...
+#   ... 25/116 checked
+# Checked 116 non-article page(s) from the sitemap; 3 with warnings: https://zaviamagazine.dev/games/shadow-ops, ...
+```
+
+Every check above looks at articles only — but most of Zavia's pages
+are not articles: the 44 tools, the 11 games, the guides, the 114
+Quran pages, the hubs and the homepage. This check fetches every
+non-article URL in the sitemap and checks the same SEO basics as the
+article check: a `<title>` (30–60 chars — Google cuts longer titles
+off), a meta description (50–160 chars — Google truncates longer
+ones, and writes its own snippet when there is none), exactly one
+`<h1>` heading, and a canonical link pointing at the page's own URL
+on a Zavia host. A 404, a missing title or a missing canonical is a
+failure (exit code 1); the rest are warnings — the page loads, it
+just looks worse in search results. The 27 Nov SEO review found game
+pages with no meta description (7 of 11) and wrong H1 counts
+(Shadow Ops had 5, Tetris and Brick Breaker had 0) — none of that
+showed up in the article audit, because these pages are not articles.
+The `--seo-report` audit tracks these page problems as issues too, so
+a fixed page shows up as "improved" in the next report. It takes
+about a minute (one quick request per page). The dashboard has the
+same check as a button in its SEO card.
+
 ### Web dashboard
 
 ```bash
@@ -310,7 +342,8 @@ python -m zavia_agent.web
 ```
 
 Home page shows site health + article count, a form to publish an
-article, and a button to run the SEO check.
+article, and buttons to run the SEO check, the sitemap liveness
+check, the crawl-files check and the pages check.
 
 ### Smoke test (no token needed)
 
